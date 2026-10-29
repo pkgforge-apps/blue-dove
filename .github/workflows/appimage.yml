@@ -81,16 +81,13 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
           persist-credentials: false
       - uses: pkgforge-dev/anylinux-setup-action@ba7321e11074f9e387a0634e653d09b115d576cd # v6
-      # cpal links libasound, and the audio servers the image carries
-      # have to be installed before quick-sharun traces the binary.
+      # The setup action leaves the toolchain out, and the audio packages
+      # this app needs are not in it either; the script installs both, and
+      # retries each pacman transaction.
       - run: sh packaging/appimage/get-dependencies.sh
       # Arch's Mesa is far larger than the debloated build, and this is
       # what users download.
       - run: get-debloated-pkgs --add-common --prefer-nano
-      # The setup action leaves the toolchain out; rustup itself is the
-      # Arch package. github-cli is what attaches the images to the
-      # release, and the container carries neither.
-      - run: pacman -S --noconfirm --needed rustup github-cli
       - run: rustup default stable
       - id: version
         run: |
