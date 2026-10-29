@@ -66,7 +66,10 @@ const DIRECTORIES: &[&str] = &[
 ];
 
 /// Where XDG puts shared data when `XDG_DATA_DIRS` says nothing.
-const DATA_DIRS: &str = "/usr/local/share:/usr/share";
+///
+/// A list, not one joined string: [`std::env::split_paths`] reads a
+/// semicolon on Windows, where the variable is a Unix convention anyway.
+const DATA_DIRS: &[&str] = &["/usr/local/share", "/usr/share"];
 
 /// Extensions a font file can carry.
 const EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "otc"];
@@ -139,7 +142,7 @@ fn data_dirs() -> Vec<PathBuf> {
 fn split_data_dirs(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     match value.filter(|dirs| !dirs.is_empty()) {
         Some(dirs) => std::env::split_paths(dirs).collect(),
-        None => std::env::split_paths(DATA_DIRS).collect(),
+        None => DATA_DIRS.iter().map(PathBuf::from).collect(),
     }
 }
 
@@ -293,6 +296,7 @@ mod tests {
             ],
             "an empty variable says nothing, so it means the same"
         );
+        #[cfg(unix)]
         assert_eq!(
             split_data_dirs(Some(OsStr::new("/opt/share:/usr/share"))),
             vec![PathBuf::from("/opt/share"), PathBuf::from("/usr/share")],
