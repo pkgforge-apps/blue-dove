@@ -830,6 +830,8 @@ impl App {
     fn switch_playlist(&mut self) {
         self.queue = None;
         self.forget_shuffle();
+        // The tab that was showing had its own search; a new one starts whole.
+        self.close_search();
         self.select_first();
         self.save_playlists();
     }
@@ -927,6 +929,46 @@ impl App {
         }
     }
 
+    /// The search box, drawn while a search is open.
+    ///
+    /// The box takes the keyboard when it opens, filters the table as the
+    /// text is typed, and walks the matches on Enter: the next one, or the
+    /// previous one with Shift. Escape closes it, which shows the whole
+    /// playlist again.
+    fn search_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.view.searching {
+            return;
+        }
+        let mut step = None;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Search").color(ui.visuals().weak_text_color()));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.view.filter)
+                    .desired_width(ui.available_width())
+                    .hint_text("title, artist or album"),
+            );
+            if std::mem::take(&mut self.view.search_focus) {
+                response.request_focus();
+            }
+            if response.changed() {
+                self.refilter();
+            }
+            // Enter is read from the box's own events: a text box gives the
+            // keyboard up on it, so the frame's input no longer carries it.
+            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                let shift = ui.input(|input| input.modifiers.shift);
+                step = Some(!shift);
+                // The box dropped the focus on Enter, and the next press has
+                // to land in it again.
+                response.request_focus();
+            }
+        });
+        if let Some(forward) = step {
+            self.step_match(forward);
+        }
+        ui.add_space(2.0);
+    }
+
     /// The width the track table is drawn at, with room for the scroll bar.
     ///
     /// It takes the panel's width, and only grows past it, to the narrowest
@@ -940,6 +982,7 @@ impl App {
     pub(crate) fn track_table(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             self.playlist_tabs(ui);
+            self.search_bar(ui);
             ui.add_space(2.0);
 
             let tracks = self.visible_tracks();

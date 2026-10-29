@@ -113,6 +113,13 @@ pub struct View {
     pub album: Option<usize>,
     /// Text of the search box.
     pub filter: String,
+    /// Whether the search box is open.
+    pub searching: bool,
+    /// Take the keyboard into the search box on the next frame.
+    ///
+    /// Focus is asked for once, when the box opens: asking every frame would
+    /// take it back from whatever the user clicked next.
+    pub search_focus: bool,
     /// The row a range selection is measured from: the last one clicked.
     pub selected: Option<usize>,
     /// Every selected row, as indices into [`crate::library::Library::tracks`].
@@ -715,7 +722,8 @@ impl App {
 
     /// Selects the first track of the playlist, if it holds one.
     pub fn select_first(&mut self) {
-        self.select(self.playlists.current().tracks.first().copied());
+        let first = self.visible_tracks().first().copied();
+        self.select(first);
     }
 
     /// Whether the row for `index` is selected.
@@ -856,6 +864,9 @@ impl App {
         self.playlists.current_mut().set(tracks);
         self.queue = None;
         self.forget_shuffle();
+        // A search left over from the old playlist would hide the album that
+        // was just opened.
+        self.close_search();
         self.select_first();
         self.view.reveal = true;
         self.save_playlists();
@@ -884,6 +895,7 @@ impl App {
         self.playlists.current_mut().add(tracks);
         self.queue = None;
         self.forget_shuffle();
+        self.close_search();
         self.select_first();
         self.view.reveal = true;
         self.save_playlists();
@@ -965,6 +977,9 @@ impl App {
     }
 
     /// Track indices in the playlist the table shows, filtered by the search box.
+    ///
+    /// The title, the artist and the album are searched, all of them in lower
+    /// case, so a search reads the way the row does.
     pub fn visible_tracks(&self) -> Vec<usize> {
         let needle = self.view.filter.trim().to_lowercase();
         self.playlists
@@ -975,11 +990,110 @@ impl App {
             .filter(|&index| {
                 needle.is_empty()
                     || self.library.tracks.get(index).is_some_and(|track| {
-                        track.title.to_lowercase().contains(&needle)
-                            || track.artist.to_lowercase().contains(&needle)
+                        matches(&needle, &track.title)
+                            || matches(&needle, &track.artist)
+                            || matches(&needle, &track.album)
                     })
             })
             .collect()
+    }
+
+    /// Selects the next or previous row the table shows, and scrolls to it.
+    ///
+    /// The walk stops at the ends rather than wrapping, which is what a list
+    /// does: holding the key does not send the selection back to the top.
+    pub fn step_selection(&mut self, forward: bool) {
+        let tracks = self.visible_tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        let position = self
+            .view
+            .selected
+            .and_then(|selected| tracks.iter().position(|&track| track == selected));
+        let next = match (position, forward) {
+            (Some(position), true) => (position + 1).min(tracks.len() - 1),
+            (Some(position), false) => position.saturating_sub(1),
+            (None, _) => 0,
+        };
+        self.select_only(tracks[next]);
+        self.view.reveal = true;
+    }
+
+    /// Selects the first or the last row the table shows.
+    pub fn select_edge(&mut self, last: bool) {
+        let tracks = self.visible_tracks();
+        let edge = if last { tracks.last() } else { tracks.first() };
+        if let Some(&index) = edge {
+            self.select_only(index);
+            self.view.reveal = true;
+        }
+    }
+
+    /// Plays the selected track, if one is selected.
+    ///
+    /// Playing a row by hand goes back to walking the playlist, rather than
+    /// the queue an earlier selection started.
+    pub fn play_selection(&mut self) {
+        let Some(index) = self.view.selected else {
+            return;
+        };
+        self.queue = None;
+        self.forget_shuffle();
+        self.play(index);
+    }
+
+    /// Opens the search box and takes the keyboard into it.
+    ///
+    /// What is already typed stays, so pressing the key twice does not lose a
+    /// search that is under way. The compact window shows no playlist, so it
+    /// has nothing to search.
+    pub fn open_search(&mut self) {
+        if self.compact {
+            return;
+        }
+        self.view.searching = true;
+        self.view.search_focus = true;
+    }
+
+    /// Closes the search box and shows the whole playlist again.
+    pub fn close_search(&mut self) {
+        self.view.searching = false;
+        self.view.search_focus = false;
+        self.view.filter.clear();
+    }
+
+    /// Selects the first track the search leaves, and scrolls to it.
+    ///
+    /// This runs as the text changes, so the table follows the typing rather
+    /// than waiting for Enter.
+    pub fn refilter(&mut self) {
+        if let Some(&first) = self.visible_tracks().first() {
+            self.select_only(first);
+            self.view.reveal = true;
+        }
+    }
+
+    /// Selects the next or previous track the search leaves, and scrolls to it.
+    ///
+    /// The walk wraps around, so Enter keeps going through the matches rather
+    /// than stopping at the last one.
+    pub fn step_match(&mut self, forward: bool) {
+        let tracks = self.visible_tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        let position = self
+            .view
+            .selected
+            .and_then(|selected| tracks.iter().position(|&track| track == selected));
+        let next = match (position, forward) {
+            (Some(position), true) => (position + 1) % tracks.len(),
+            (Some(position), false) => (position + tracks.len() - 1) % tracks.len(),
+            (None, _) => 0,
+        };
+        self.select_only(tracks[next]);
+        self.view.reveal = true;
     }
 
     /// Texture for an album's cover, uploading it on first use.
@@ -1595,11 +1709,26 @@ impl App {
 
     /// Handles the keyboard shortcuts, unless a text box has the focus.
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Escape belongs to the search box while it is open, and the box may
+        // hold the keyboard, so it is read before the focus check below.
+        if self.view.searching && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.close_search();
+        }
+        // Down leaves the search box for the table, so the results it found
+        // can be walked with the arrows. The text stays, and the box is one
+        // press of the key away again.
+        if self.view.searching
+            && ctx.memory(|memory| memory.focused().is_some())
+            && ctx.input(|input| input.key_pressed(egui::Key::ArrowDown))
+        {
+            ctx.memory_mut(|memory| memory.stop_text_input());
+            self.step_selection(true);
+            return;
+        }
         if ctx.memory(|memory| memory.focused().is_some()) {
             return;
         }
         let pressed = |key| ctx.input(|input| input.key_pressed(key));
-        let command = ctx.input(|input| input.modifiers.command);
 
         if pressed(egui::Key::Space) {
             self.toggle();
@@ -1607,35 +1736,59 @@ impl App {
         if pressed(egui::Key::Delete) {
             self.remove_selected();
         }
-        if command && pressed(egui::Key::A) {
+        if chord(ctx, egui::Modifiers::COMMAND, egui::Key::A) {
             self.select_all();
         }
-        if command && pressed(egui::Key::O) {
+        if chord(ctx, egui::Modifiers::COMMAND, egui::Key::O) {
             self.ask_for_directory();
         }
-        if pressed(egui::Key::ArrowRight) {
-            if command {
-                self.step(true);
-            } else {
-                self.seek_relative(5.0);
-            }
+        if chord(ctx, egui::Modifiers::COMMAND, egui::Key::F) {
+            self.open_search();
         }
-        if pressed(egui::Key::ArrowLeft) {
-            if command {
-                self.step(false);
-            } else {
-                self.seek_relative(-5.0);
-            }
+        // A bare slash opens the search too, the way it does in a pager. Its
+        // text goes with the key, or the box opens with a slash in it, and a
+        // shifted slash is a question mark that stays a character.
+        if chord(ctx, egui::Modifiers::NONE, egui::Key::Slash) {
+            ctx.input_mut(|input| {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Text(text) if text == "/"));
+            });
+            self.open_search();
         }
-        if pressed(egui::Key::ArrowUp) {
+        if chord(ctx, egui::Modifiers::NONE, egui::Key::Enter) {
+            self.play_selection();
+        }
+        if chord(ctx, egui::Modifiers::COMMAND, egui::Key::ArrowRight) {
+            self.step(true);
+        } else if pressed(egui::Key::ArrowRight) {
+            self.seek_relative(5.0);
+        }
+        if chord(ctx, egui::Modifiers::COMMAND, egui::Key::ArrowLeft) {
+            self.step(false);
+        } else if pressed(egui::Key::ArrowLeft) {
+            self.seek_relative(-5.0);
+        }
+        // The arrows walk the table, which is what a list does; a chord with
+        // Shift jumps to its ends and one with Control turns the volume, so
+        // the plain keys are free for the list. Most specific first, since
+        // each match consumes the press.
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+            self.select_edge(false);
+        } else if chord(ctx, egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+            self.select_edge(true);
+        } else if chord(ctx, egui::Modifiers::COMMAND, egui::Key::ArrowUp) {
             let volume = self.volume;
             self.set_volume(volume + 0.05);
             self.save_config();
-        }
-        if pressed(egui::Key::ArrowDown) {
+        } else if chord(ctx, egui::Modifiers::COMMAND, egui::Key::ArrowDown) {
             let volume = self.volume;
             self.set_volume(volume - 0.05);
             self.save_config();
+        } else if pressed(egui::Key::ArrowUp) {
+            self.step_selection(false);
+        } else if pressed(egui::Key::ArrowDown) {
+            self.step_selection(true);
         }
     }
 
@@ -1651,6 +1804,40 @@ impl App {
             ctx.request_repaint();
         }
     }
+}
+
+/// Whether `key` was pressed with exactly `modifiers`, consuming the press.
+///
+/// The modifiers are taken from the event itself rather than from
+/// `input.modifiers`, which is the state when the frame runs: a quick press
+/// has let go of control by then, so the chord would arrive as a bare letter
+/// and be missed. `matches_exact` keeps a shifted key, such as the question
+/// mark on the slash key, from matching the plain one.
+fn chord(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    ctx.input_mut(|input| {
+        let mut hit = false;
+        input.events.retain(|event| {
+            let matched = matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    modifiers: event_modifiers,
+                    ..
+                } if *pressed == key && event_modifiers.matches_exact(modifiers)
+            );
+            hit |= matched;
+            !matched
+        });
+        hit
+    })
+}
+
+/// Whether `text` holds `needle`, which is already in lower case.
+///
+/// Case is folded on both sides, so a search for `kero` finds `Kero Kero`.
+fn matches(needle: &str, text: &str) -> bool {
+    text.to_lowercase().contains(needle)
 }
 
 /// Whether pressing back restarts the playing track rather than moving to
@@ -1851,6 +2038,154 @@ pub(crate) mod tests {
 
         app.view.filter = "nothing".to_string();
         assert!(app.visible_tracks().is_empty());
+    }
+
+    #[test]
+    fn the_search_reads_the_album_as_well_as_the_track() {
+        let mut app = app_with(&[("One", &["A"]), ("Two", &["B"])]);
+        app.playlists.current_mut().add(vec![1]);
+        app.view.filter = "two".to_string();
+        let shown = app.visible_tracks();
+        assert_eq!(shown.len(), 1, "the album the second track belongs to");
+        assert_eq!(app.library.tracks[shown[0]].title, "B");
+    }
+
+    #[test]
+    fn typing_selects_the_first_match_and_scrolls_to_it() {
+        let mut app = app_with(&[("One", &["Opening", "Finale", "Opening Again"])]);
+        app.open_search();
+        assert!(app.view.searching);
+        assert!(app.view.search_focus, "the box takes the keyboard");
+
+        app.view.filter = "open".to_string();
+        app.refilter();
+        assert_eq!(app.view.selected, Some(0));
+        assert!(app.view.reveal, "the match is brought into view");
+        assert!(app.is_selected(0));
+    }
+
+    #[test]
+    fn enter_walks_the_matches_and_wraps_around() {
+        let mut app = app_with(&[("One", &["Opening", "Finale", "Opening Again"])]);
+        app.view.filter = "open".to_string();
+        app.refilter();
+        assert_eq!(app.view.selected, Some(0));
+
+        app.step_match(true);
+        assert_eq!(
+            app.view.selected,
+            Some(2),
+            "the next match, not the row after"
+        );
+
+        app.step_match(true);
+        assert_eq!(app.view.selected, Some(0), "the walk wraps around");
+
+        app.step_match(false);
+        assert_eq!(app.view.selected, Some(2), "and goes back the same way");
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_leaves_the_selection_alone() {
+        let mut app = app_with(&[("One", &["Opening"])]);
+        app.select_only(0);
+        app.view.filter = "nothing".to_string();
+        app.refilter();
+        assert_eq!(app.view.selected, Some(0));
+        app.step_match(true);
+        assert_eq!(app.view.selected, Some(0), "there is no match to step to");
+    }
+
+    #[test]
+    fn escape_closes_the_search_and_shows_the_whole_playlist() {
+        let mut app = app_with(&[("One", &["Opening", "Finale"])]);
+        app.open_search();
+        app.view.filter = "open".to_string();
+        app.refilter();
+        assert_eq!(app.visible_tracks().len(), 1);
+
+        app.close_search();
+        assert!(!app.view.searching);
+        assert!(app.view.filter.is_empty());
+        assert_eq!(app.visible_tracks().len(), 2);
+    }
+
+    #[test]
+    fn opening_an_album_clears_a_search_left_over_from_the_last_one() {
+        let mut app = app_with(&[("One", &["Opening"]), ("Two", &["Finale"])]);
+        app.open_search();
+        app.view.filter = "finale".to_string();
+        app.refilter();
+
+        app.open_album(0);
+        assert!(!app.view.searching);
+        assert!(app.view.filter.is_empty());
+        assert_eq!(app.visible_tracks().len(), 1, "the album is shown whole");
+    }
+
+    #[test]
+    fn the_arrows_walk_the_rows_and_stop_at_the_ends() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.select_only(0);
+
+        app.step_selection(true);
+        assert_eq!(app.view.selected, Some(1));
+        assert!(app.view.reveal, "the row is brought into view");
+
+        app.step_selection(true);
+        app.step_selection(true);
+        assert_eq!(app.view.selected, Some(2), "the walk stops at the last row");
+
+        app.step_selection(false);
+        assert_eq!(app.view.selected, Some(1));
+
+        app.step_selection(false);
+        app.step_selection(false);
+        assert_eq!(app.view.selected, Some(0), "and at the first one");
+    }
+
+    #[test]
+    fn the_arrows_walk_only_what_the_search_leaves() {
+        let mut app = app_with(&[("One", &["Opening", "Finale", "Opening Again"])]);
+        app.view.filter = "open".to_string();
+        app.refilter();
+        assert_eq!(app.view.selected, Some(0));
+
+        app.step_selection(true);
+        assert_eq!(
+            app.view.selected,
+            Some(2),
+            "Finale is not shown, so it is skipped"
+        );
+    }
+
+    #[test]
+    fn shift_jumps_to_the_first_or_the_last_row() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.select_only(1);
+
+        app.select_edge(true);
+        assert_eq!(app.view.selected, Some(2));
+        assert!(app.view.reveal);
+
+        app.select_edge(false);
+        assert_eq!(app.view.selected, Some(0));
+    }
+
+    #[test]
+    fn enter_plays_the_selected_track() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.queue = Some(vec![1]);
+        app.select_only(1);
+        app.play_selection();
+        assert_eq!(app.queue, None, "the playlist is walked again, not a queue");
+
+        // With nothing selected there is nothing to play, and the queue a
+        // selection started stays as it was.
+        app.clear_selection();
+        app.queue = Some(vec![0]);
+        app.play_selection();
+        assert_eq!(app.queue, Some(vec![0]));
     }
 
     #[test]

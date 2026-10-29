@@ -289,19 +289,48 @@ hear.
 The volume slider sits at the right-hand end of the control strip, below
 the album art. Drag it, or roll the wheel over it: each notch moves it by
 a twentieth, and the setting is written to the settings file when you let
-go. `Up` and `Down` do the same from the keyboard.
+go. `Ctrl+Up` and `Ctrl+Down` do the same from the keyboard.
+
+## Search
+
+`Ctrl+F` or `/` opens the search box above the playlist. It looks through
+the title, the artist and the album of every track in the tab, ignoring
+case, and the table narrows as you type: the first match is selected and
+scrolled into view, so the result is on screen before you press anything
+else.
+
+| Key | Does |
+|-----|------|
+| `Enter` | The next match |
+| `Shift+Enter` | The previous one |
+| `Down` | Leave the box for the table, on the next match |
+| `Escape` | Close the search and show the whole playlist |
+
+`Enter` wraps around, so it walks the matches rather than stopping at the
+last one. Once the box has given up the keyboard, the arrows walk the
+table as usual.
+
+Opening an album, switching tabs or adding a directory closes the search,
+since what it found belonged to the playlist that was showing.
 
 ## Keyboard
 
 | Key | Does |
 |-----|------|
 | `Space` | Play or pause |
+| `Enter` | Play the selected row |
+| `Up` / `Down` | Select the row above or below |
+| `Shift+Up` / `Shift+Down` | Select the first or the last row |
 | `Left` / `Right` | Seek five seconds back or forward |
 | `Ctrl+Left` / `Ctrl+Right` | Previous or next track |
-| `Up` / `Down` | Raise or lower the volume |
+| `Ctrl+Up` / `Ctrl+Down` | Raise or lower the volume |
+| `Ctrl+F` or `/` | Search the playlist |
 | `Ctrl+O` | Open a music directory |
+| `Delete` | Remove the selected rows from the playlist |
+| `Ctrl+A` | Select every row the table shows |
 
-Shortcuts are ignored while the search box has the keyboard focus.
+Shortcuts are ignored while the search box has the keyboard focus, except
+`Escape`, which closes it, and `Down`, which leaves it for the table.
 
 ## Themes
 

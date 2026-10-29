@@ -435,6 +435,23 @@ Platform notes:
   Next, Previous and Random walk until a row is played by hand. Removing
   rows edits `playlist.tracks` and nothing else: the app never deletes,
   moves or rewrites an audio file, and a test pins that.
+- The search box is `View::searching` and `View::filter`, drawn above the
+  table by `ui::search_bar`. `Ctrl+F` or `/` opens it and `View::search_focus`
+  asks for the keyboard once, so the box does not take it back every frame.
+  `App::refilter` selects the first match as the text changes, and
+  `App::step_match` walks them on Enter, wrapping at the end. `Down` in the
+  box surrenders the keyboard and steps into the table, which is how the
+  results are walked with the arrows. Opening an album, switching tabs or
+  adding a directory calls `close_search`, since a filter left over from
+  the old playlist would hide the new one. `visible_tracks` is the one
+  place the filter is applied, so the table, the selection walk, select-all
+  and the range selection all agree on what is shown.
+- A shortcut is matched by `chord`, which reads the modifiers off the key
+  event and consumes the press. `input.modifiers` is the state when the
+  frame runs, and a quick press has released control by then, so a chord
+  read from it arrives as a bare letter and is missed; the plain arrows
+  never worked as volume keys for the same reason. The arrows walk the
+  table, `Shift` jumps to its ends and `Ctrl` changes the volume.
 - Double-clicking a directory appends what it holds to the playlist:
   `Directory::tracks_deep` walks it in the order the album list draws it,
   so each album's tracks in playing order, then the loose files beside
