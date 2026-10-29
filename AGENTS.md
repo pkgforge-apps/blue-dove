@@ -525,6 +525,21 @@ Platform notes:
   none itself, to keep the binary small. A list of fixed paths was not
   enough: stock Arch and Debian install `DroidSansFallback`, which those
   paths did not name, so every Japanese title drew as boxes.
+- The directories are `XDG_DATA_HOME/fonts` and `XDG_DATA_DIRS/fonts`,
+  with the spec's `/usr/local/share:/usr/share` standing in when the
+  latter is unset or empty, plus the macOS and Windows locations. Reading
+  the environment rather than a fixed path is what makes the AppImage
+  work: quick-sharun rewrites the `/usr/share` literal in the binary to
+  point inside the image, and the image's share directory carries no
+  fonts, so a compiled-in path leads nowhere. The environment still names
+  the host's directories at run time, so the fonts the user has are the
+  ones that get used. Confirmed with strace on the shipped image: the
+  compiled-in path opened `/tmp/<random>/fonts` and found nothing, and
+  this one opens `/usr/share/fonts/droid/DroidSansFallbackFull.ttf`.
+- Fontconfig is not consulted. It would mean parsing its configuration or
+  linking a C library, and the XDG variables say the same thing in two
+  lines; egui does its own font handling, so a font database would be a
+  whole dependency for one path lookup.
 - eframe's `accesskit` feature is off. Its atspi and zbus bindings cost
   around 1.5 MB, which the size budget for this app does not allow, so
   the window has no screen-reader support.

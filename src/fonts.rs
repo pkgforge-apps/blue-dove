@@ -53,15 +53,20 @@ const PATTERNS: &[&str] = &[
     "arialuni",
 ];
 
-/// Font directories, as the systems that matter lay them out.
+/// Font directories that XDG does not cover.
+///
+/// Linux keeps its fonts under `XDG_DATA_HOME` and `XDG_DATA_DIRS`, which
+/// [`directories`] reads. macOS and Windows lay them out elsewhere, and the
+/// X11 directory is a leftover for a system with no XDG fonts at all.
 const DIRECTORIES: &[&str] = &[
-    "/usr/share/fonts",
-    "/usr/local/share/fonts",
     "/usr/share/X11/fonts",
     "/System/Library/Fonts",
     "/Library/Fonts",
     "C:\\Windows\\Fonts",
 ];
+
+/// Where XDG puts shared data when `XDG_DATA_DIRS` says nothing.
+const DATA_DIRS: &str = "/usr/local/share:/usr/share";
 
 /// Extensions a font file can carry.
 const EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "otc"];
@@ -99,19 +104,43 @@ fn find() -> Option<PathBuf> {
 }
 
 /// The font directories of the system and of the user.
+///
+/// `XDG_DATA_HOME` and `XDG_DATA_DIRS` name where data lives, and each holds
+/// a `fonts` directory. Reading them, rather than trusting a fixed path, is
+/// what makes an Anylinux AppImage find fonts: quick-sharun rewrites the
+/// `/usr/share` literal in the binary to point inside the image, whose share
+/// directory carries none, while the environment still names the host's
+/// directories at run time.
 fn directories() -> Vec<PathBuf> {
-    let mut directories: Vec<PathBuf> = DIRECTORIES.iter().map(PathBuf::from).collect();
+    let mut directories = Vec::new();
     if let Some(data) = dirs::data_dir() {
         directories.push(data.join("fonts"));
     }
-    if let Some(home) = dirs::home_dir() {
-        directories.push(home.join(".fonts"));
-        directories.push(home.join(".local").join("share").join("fonts"));
+    for directory in data_dirs() {
+        directories.push(directory.join("fonts"));
     }
+    directories.extend(DIRECTORIES.iter().map(PathBuf::from));
     if let Some(windows) = std::env::var_os("WINDIR") {
         directories.push(PathBuf::from(windows).join("Fonts"));
     }
     directories
+}
+
+/// The entries of `XDG_DATA_DIRS`, or the two XDG names when it is unset.
+fn data_dirs() -> Vec<PathBuf> {
+    split_data_dirs(std::env::var_os("XDG_DATA_DIRS").as_deref())
+}
+
+/// The directories `XDG_DATA_DIRS` names, or the standard two when it is
+/// unset or empty.
+///
+/// An empty variable is set but says nothing, which the XDG spec treats as
+/// unset; reading it as "no directories" would hide every font.
+fn split_data_dirs(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    match value.filter(|dirs| !dirs.is_empty()) {
+        Some(dirs) => std::env::split_paths(dirs).collect(),
+        None => std::env::split_paths(DATA_DIRS).collect(),
+    }
 }
 
 /// Collects the font files under `directory`, a few levels deep.
@@ -242,5 +271,32 @@ mod tests {
         assert!(is_font(Path::new("/x/DroidSansJapanese.TTF")));
         assert!(!is_font(Path::new("/x/fonts.dir")));
         assert!(!is_font(Path::new("/x/README")));
+    }
+
+    #[test]
+    fn the_xdg_directories_are_read() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            split_data_dirs(None),
+            vec![
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share")
+            ],
+            "unset, XDG_DATA_DIRS means the two standard names"
+        );
+        assert_eq!(
+            split_data_dirs(Some(OsStr::new(""))),
+            vec![
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share")
+            ],
+            "an empty variable says nothing, so it means the same"
+        );
+        assert_eq!(
+            split_data_dirs(Some(OsStr::new("/opt/share:/usr/share"))),
+            vec![PathBuf::from("/opt/share"), PathBuf::from("/usr/share")],
+            "a set variable is used as it stands"
+        );
     }
 }
