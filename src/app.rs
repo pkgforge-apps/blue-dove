@@ -890,6 +890,19 @@ impl App {
         self.add_tracks(tracks);
     }
 
+    /// Appends every album in the library to the playlist.
+    ///
+    /// The tracks arrive in the order the album list draws them, so the whole
+    /// library reads down the table the way it reads down the list. Loose
+    /// files are left out, since they belong to no album.
+    pub fn add_all_albums(&mut self) {
+        let tracks = self.library.album_tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        self.add_tracks(tracks);
+    }
+
     /// Appends `tracks` to the playlist and brings the first into view.
     fn add_tracks(&mut self, tracks: Vec<usize>) {
         self.playlists.current_mut().add(tracks);
@@ -2357,6 +2370,30 @@ pub(crate) mod tests {
         assert_eq!(boxed.children.len(), 2);
         app.add_directory_at(&boxed.path);
         assert_eq!(app.playlists.current().tracks, [0, 1]);
+    }
+
+    #[test]
+    fn adding_the_library_queues_every_album_in_list_order() {
+        // The list sorts directories by name and albums by title, so the
+        // library is queued in that order, whatever order the scan found the
+        // files in. The loose file is not an album, so it stays out.
+        let mut tracks = Vec::new();
+        for (album, title) in [("Zeta", "B"), ("Alpha", "A"), ("Middle", "C")] {
+            tracks.push(track(album, 1, title));
+        }
+        let mut loose = track("Alpha", 2, "Loose");
+        loose.tagged_album = false;
+        tracks.push(loose);
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(tracks);
+        app.playlists.current_mut().clear();
+        app.add_all_albums();
+        assert_eq!(
+            app.playlists.current().tracks,
+            [1, 2, 0],
+            "Alpha, Middle, Zeta, with the loose file left out"
+        );
     }
 
     #[test]

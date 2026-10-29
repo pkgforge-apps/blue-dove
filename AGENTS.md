@@ -465,6 +465,10 @@ Platform notes:
   so each album's tracks in playing order, then the loose files beside
   them, then each subdirectory. A directory of loose files alone queues
   those, since it holds no album.
+- The **Add All** button in the Library header appends every album in the
+  library to the playlist, in the order the album list draws them:
+  `Library::album_tracks` walks the tree the way `tracks_deep` does but
+  stops at the albums, so the loose files, which belong to none, stay out.
 - Both long lists draw only the rows on screen. The track table does it
   from `ui::table_rows`, and the album list from `ui::LibraryRow`, a
   flattened tree built once a frame (indices and paths, no borrows) with

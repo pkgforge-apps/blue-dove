@@ -1323,6 +1323,15 @@ impl App {
                     .strong()
                     .color(ui.visuals().weak_text_color()),
             );
+            let add_all = ui
+                .add_enabled(
+                    !self.library.albums.is_empty(),
+                    egui::Button::new("Add All").small(),
+                )
+                .on_hover_text("Appends every album in the library to this playlist");
+            if add_all.clicked() {
+                self.add_all_albums();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(self.library.albums.len().to_string())

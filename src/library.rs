@@ -240,6 +240,20 @@ impl Library {
         self.directories.iter().find_map(|root| find(root, path))
     }
 
+    /// Every album's tracks in the library, in the order the album list shows
+    /// them.
+    ///
+    /// That is each top-level directory in turn, each as
+    /// [`Directory::album_tracks`] walks it, so adding the whole library
+    /// queues it in the order it is drawn.
+    pub fn album_tracks(&self) -> Vec<usize> {
+        let mut found = Vec::new();
+        for directory in &self.directories {
+            found.extend(directory.album_tracks(&self.albums));
+        }
+        found
+    }
+
     /// The album each track belongs to, by track index.
     ///
     /// `None` is a loose file, which belongs to no album. The track table
@@ -314,6 +328,24 @@ impl Directory {
         found.extend(self.loose.iter().copied());
         for child in &self.children {
             found.extend(child.tracks_deep(albums));
+        }
+        found
+    }
+
+    /// Every album's tracks in this directory and below it, in the order the
+    /// album list shows them.
+    ///
+    /// The loose files are left out: they belong to no album, and the album
+    /// list gives them a row of their own.
+    pub fn album_tracks(&self, albums: &[Album]) -> Vec<usize> {
+        let mut found = Vec::new();
+        for &index in &self.albums {
+            if let Some(album) = albums.get(index) {
+                found.extend(album.tracks.iter().copied());
+            }
+        }
+        for child in &self.children {
+            found.extend(child.album_tracks(albums));
         }
         found
     }
