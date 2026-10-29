@@ -565,8 +565,7 @@ Platform notes:
   and one codegen unit are already on, and `opt-level` stays at the
   default rather than `"s"`.
 
-The AppImage workflow is app-specific (`appimage.yml`). It builds when a
-release is published, and on demand with a tag to rebuild one. It runs
+The AppImage workflow is app-specific (`appimage.yml`). It runs
 `packaging/appimage/get-dependencies.sh` first, which adds the ALSA and
 PulseAudio packages the shared setup action leaves out, then the
 debloated packages, then `scripts/package-appimage.sh` with
@@ -575,6 +574,23 @@ through libasound. It smoke-runs the image, and produces
 `blue-dove-anylinux-<arch>.AppImage` and its `.zsync`, named for what the
 file is: an image that runs on any distribution, not one built for a
 particular one.
+
+The image carries its own glibc, `ld-linux` and libraries, so it depends
+on neither the host's libc nor an FHS layout. Verified by running the
+shipped image's `--version` in an `alpine` container, which has only the
+musl loader, and in a `nixos/nix` one, which has no `/etc/os-release` and
+no glibc loader; both printed the version and exited 0. Keep the wording
+in `README.md` and `docs/guide/installation.md` to what the image does,
+not to what the build host is.
+
+It starts on `workflow_run` of the `release` workflow, and that covers a
+release only when a person dispatched it. release-plz dispatches the
+release workflow with `GITHUB_TOKEN`, and GitHub starts no workflow for an
+event a `GITHUB_TOKEN` produced, the completion included, so a release cut
+by release-plz publishes with no image until this workflow is dispatched
+by hand with its tag. `release.yml` is a synced copy of the shared one and
+cannot carry a second job, so a real fix belongs in the shared
+`app-release.yml`.
 
 PipeWire is not deployed. cpal reaches the sound server through an ALSA
 plugin, and the image's default PCM is the pulse one, because

@@ -8,8 +8,16 @@ name: appimage
 # The images are attached here instead, to the release it published.
 #
 # The trigger is the release workflow's completion, not `release:
-# published`: a release published with GITHUB_TOKEN starts no workflow,
-# so the release event never fires. workflow_run is not held to that.
+# published`: a release published with GITHUB_TOKEN starts no workflow, so
+# the release event never fires.
+#
+# This only covers a release workflow started by a person. release-plz
+# dispatches it with GITHUB_TOKEN, and GitHub starts no workflow for an
+# event a GITHUB_TOKEN produced, the completion included, so that path
+# publishes a release with no image. `.github/workflows/release.yml` is a
+# synced copy of the shared one and cannot carry a second job, so until
+# the shared workflow builds the image itself, a release cut by release-plz
+# needs this workflow dispatched by hand with its tag.
 on:
   workflow_dispatch:
     inputs:

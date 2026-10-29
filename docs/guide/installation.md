@@ -23,7 +23,10 @@ Add it to your application menu with:
 
 The `.AppImage` is a single file too, with DwarFS compression and no
 FUSE requirement: it falls back to namespaces, then to extracting
-itself. Make it executable and run it:
+itself. It carries its own glibc, dynamic loader and libraries, so it
+runs on any distribution rather than only a glibc one: musl systems such
+as Alpine and non-FHS systems such as NixOS work as they are, with no
+wrapper. Make it executable and run it:
 
 ```sh
 chmod +x blue-dove-anylinux-x86_64.AppImage

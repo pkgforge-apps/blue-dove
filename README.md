@@ -112,11 +112,23 @@ chmod +x blue-dove-anylinux-x86_64.AppImage
 ```
 
 It is an [Anylinux AppImage](https://github.com/pkgforge-dev/Anylinux-AppImages),
-which is the one to take if you want the widest reach: it runs on any
-glibc distribution, and with its compatibility layer on kernels older than
-the one the other builds are linked against. It is built in an Arch
-container by `packaging/appimage`, and its own self-updater is off while an
-AppImage manager such as `am` or `soar` owns the file.
+which is the one to take if you want the widest reach. It carries its own
+glibc, dynamic loader and every library it needs, so it does not care what
+the distribution underneath it is:
+
+- **Any libc.** It runs on a glibc distribution and on a musl one such as
+  Alpine, since it brings its own C library rather than borrowing the
+  host's.
+- **Any layout.** It runs on a non-FHS distribution such as NixOS, where
+  the usual `/lib` and `/usr` are not there to find.
+- **Old kernels.** Its compatibility layer covers kernels older than the
+  one the other builds are linked against.
+- **No FUSE.** If the kernel cannot mount it, it falls back to namespaces
+  and then to extracting itself and running from there.
+
+It is built in an Arch container by `packaging/appimage`, and its own
+self-updater is off while an AppImage manager such as `am` or `soar` owns
+the file.
 
 ## Build from source
 
