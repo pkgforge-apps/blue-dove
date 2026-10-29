@@ -1,4 +1,10 @@
 
+## [0.1.4](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.3...v0.1.4) - 2026-10-29
+
+### Features
+
+- *(ui)* Add every album in the library from its header - ([843120c](https://github.com/pkgforge-apps/blue-dove/commit/843120c6a89528a0700c5559f0cfde410c4eef3c))
+
 ## [0.1.3](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.2...v0.1.3) - 2026-10-29
 
 ### Miscellaneous Tasks
