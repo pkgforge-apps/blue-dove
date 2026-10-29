@@ -13,7 +13,7 @@ permissions: {}
 
 jobs:
   release-plz:
-    uses: pkgforge-apps/.github/.github/workflows/app-release-plz.yml@b5c25eeecd616cf5802956045d8832691b5b814f
+    uses: pkgforge-apps/.github/.github/workflows/app-release-plz.yml@f9f338029cc2e90594b790c348500e6591068ae6
     permissions:
       contents: write
       pull-requests: write

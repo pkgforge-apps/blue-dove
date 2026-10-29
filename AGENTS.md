@@ -50,8 +50,10 @@ Pick one per app at the start; do not mix them.
 - CI tests on all three platforms. A change that only compiles on yours
   is not done.
 - An app that links a system library names its Debian packages, one per
-  line, in `.github/apt-packages.txt`, and CI installs them before it
-  builds. The file takes comments. Keep it to what the build needs: the
+  line, in `.github/apt-packages.txt`, and the jobs that build on Ubuntu
+  install them first. The jobs that build in an Arch container read the
+  same list in `.github/pacman-packages.txt`, with Arch's package names.
+  Both files take comments. Keep them to what the build needs: the
   release bundles carry their own libraries, so this is for compiling,
   not for running.
 
@@ -544,7 +546,8 @@ The app does not set `appimage = true` in `Cargo.toml`: the shared
 release job installs neither of those packages, so its AppImage would
 fail to build this app.
 
-`.github/apt-packages.txt` names the Debian packages the build needs,
-which CI installs before it compiles. It is what keeps `alsa-sys` from
-failing on the Linux runners.
+`.github/apt-packages.txt` names the Debian packages the build needs and
+`.github/pacman-packages.txt` the Arch ones, which the jobs building in an
+Arch container read. Both are what keep `alsa-sys` from failing: on the
+Ubuntu runners, and in the onelf and AppImage containers.
 

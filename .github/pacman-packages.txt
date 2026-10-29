@@ -1,0 +1,7 @@
+# What the build links against in the Arch containers, which the onelf and
+# AppImage jobs build in.
+#
+# alsa-lib is the same requirement as libasound2-dev on Debian: cpal reaches
+# ALSA through alsa-sys, which needs the library to compile against. It is
+# also what quick-sharun traces when it bundles the runtime library.
+alsa-lib
