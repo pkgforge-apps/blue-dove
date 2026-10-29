@@ -25,11 +25,15 @@ two exists, so an app switches by adding the PNG and deleting the SVG.
   house style. Keep them subtle.
 - Plain SVG only: paths, rects, circles, linear gradients. No filters,
   masks, embedded images or fonts, so every renderer draws it the same.
-- A pixel-art icon is a PNG instead, with the art on a square grid and a
-  transparent margin. Every size is then a whole multiple of the grid, so
-  the pixels stay square; leave the margin fully transparent, since a
-  faint halo left over from scaling the art up shows as a white smudge on
-  a dark desktop.
+- A pixel-art icon is a square PNG instead, with the art on a square grid
+  and a transparent margin. The script scales it nearest-neighbour to 16,
+  24, 32, 48, 64, 128, 256, 512 and 1024 px: a size that is a whole
+  multiple of the grid keeps every pixel square, any other comes out with
+  uneven pixels. A 16 px grid is exact at every size but 24; a 32 px grid
+  is also uneven at 48, and at 16 and 24 it loses pixels, which thins
+  its lines. Leave the margin fully
+  transparent, since a faint halo left over from scaling the art up shows
+  as a white smudge on a dark desktop.
 - ASCII only, like every file in the repository.
 - When the full icon is too detailed for a browser tab, add a simplified
   `assets/favicon.svg`; the script prefers it for the favicon.
@@ -45,7 +49,9 @@ resvg -w 512 assets/icon.svg /tmp/icon-preview/512.png
 resvg -w 32 assets/icon.svg /tmp/icon-preview/32.png
 ```
 
-Iterate until the 32 px render is still recognizable.
+Iterate until the 32 px render is still recognizable. For a pixel-art
+icon, preview with `magick assets/icon.png -filter point -resize 32x32
+/tmp/icon-preview/32.png` instead.
 
 ## Generate
 

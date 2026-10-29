@@ -204,6 +204,11 @@ without LLVM, which adds about 8 MB; do not drop it to save space. A smudge
 app drawing with its CPU renderer needs no GL, so it turns `gl` and
 `dri` off in `onelf.toml`; confirm with the `test-linux-bundle` skill.
 
+The onelf bundle updates itself with `--onelf-update`, downloading only
+what changed since the copy it replaces. Once the app has its update key
+it accepts only releases signed with it; the `release` skill covers how
+the key is made and used.
+
 Run the `test-linux-bundle` skill before merging any change that can
 alter what the bundle loads: `onelf.toml`, a dependency that links or
 opens a system library, an onelf upgrade, or a feature that reaches a
@@ -215,7 +220,9 @@ expect that format, by setting `appimage = true` under
 `[package.metadata.pkgforge]` in `Cargo.toml`. It is a second format,
 not a replacement for the onelf bundle. The release pipeline builds it
 with `scripts/package-appimage.sh`; the `anylinux-appimage` skill
-covers it.
+covers it. An app whose stack quick-sharun cannot detect, such as the
+audio servers reached through ALSA plugins, names the `DEPLOY_*`
+variables it needs in `packaging/appimage/deploy.env`.
 
 Apps are not published to crates.io by default. When one should be,
 publish it through crates.io trusted publishing, never with a token
@@ -232,10 +239,10 @@ stored in repository secrets.
 
 ## Icons
 
-`assets/icon.svg` is the single source for every icon. Regenerate the
-rasters, the Windows `.ico` and the docs favicons with
-`scripts/icons.sh` after changing it. The `app-icon` skill covers the
-design rules.
+`assets/icon.svg` is the single source for every icon, or
+`assets/icon.png` when the icon is pixel art. Regenerate the rasters, the
+Windows `.ico` and the docs favicons with `scripts/icons.sh` after
+changing it. The `app-icon` skill covers the design rules.
 
 ## Layout
 
@@ -245,11 +252,12 @@ design rules.
 |   |-- main.rs          entry point, window options
 |   `-- app.rs           application state and root UI
 |-- assets/
-|   |-- icon.svg         icon source
+|   |-- icon.svg         icon source, or icon.png for pixel art
 |   |-- icon.ico         Windows icon, generated
 |   `-- icons/           PNG sizes, generated
 |-- packaging/
 |   |-- linux/app.desktop
+|   |-- appimage/deploy.env  optional DEPLOY_* variables
 |   `-- macos/Info.plist
 |-- docs/                VitePress site
 |-- scripts/             shared, except bootstrap.sh in the template

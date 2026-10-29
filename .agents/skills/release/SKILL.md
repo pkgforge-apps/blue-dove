@@ -60,7 +60,7 @@ the release PR, or use `feat!:` and `BREAKING CHANGE:` for a major bump.
 | build | macos-latest, both arches | `<app>-<arch>-macos.dmg` with the `.app` |
 | build | windows-latest | `<app>-x86_64-windows.exe`, the C runtime linked in |
 | onelf | Arch containers | `<app>-<arch>-linux.onelf` |
-| appimage | Arch containers, when opted in | `<app>-<arch>-linux.AppImage` and its `.zsync` |
+| appimage | Arch containers, when opted in | `<app>-anylinux-<arch>.AppImage` and its `.zsync` |
 
 Packaging is in `scripts/package.sh`, `scripts/package-onelf.sh` and
 `scripts/package-appimage.sh`, so it runs the same locally. No `.sha256`
@@ -141,6 +141,33 @@ That version is checked against the SHA-256 digest GitHub lists for its
 release asset rather than a pinned one. Releases started by release-plz
 always use the pinned version.
 
+### Self-update
+
+Every onelf bundle updates itself: `<bundle> --onelf-update` fetches the
+same asset from the app's latest release and downloads only the blocks
+that changed. `scripts/package-onelf.sh` adds the `[update]` section at
+build time, with that asset's URL and a revision derived from the
+version (1.2.3 is 1002003), so a client never moves to an older release.
+Do not add `[update]` to `onelf.toml` yourself; packaging refuses it.
+
+Updates are signed once the app has its key:
+
+1. bootstrap-app creates the `release` environment, usable by `main`
+   alone.
+2. The `provision-apps` workflow of pkgforge-apps/.github generates a
+   keypair, stores the secret there as `ONELF_SIGNING_KEY`, and opens a
+   pull request committing the public half as
+   `packaging/onelf/update.pub`. It runs daily, or by hand:
+   `gh workflow run provision-apps.yml -R pkgforge-apps/.github`.
+3. Once that merges, the release job signs each bundle and publishes
+   `<asset>.onelf.sig` beside it, which is where the runtime looks.
+   Installed bundles accept only signed updates from then on.
+
+Until then a bundle updates unsigned: it trusts HTTPS and GitHub alone,
+and onelf says so on every update. The key is never replaced
+automatically, since every bundle released with it embeds it; replacing
+it takes a keyring, as onelf's self-update guide describes.
+
 ### The AppImage
 
 An app ships an Anylinux AppImage next to the onelf bundle by setting
@@ -156,6 +183,13 @@ covers building, checking and debugging the image.
 
 ## Troubleshooting
 
+- **`the release environment has no ONELF_SIGNING_KEY`.** The app has
+  `packaging/onelf/update.pub` but its secret is gone. Restore it, or
+  rotate the key through a keyring by hand; a new key alone would stop
+  every installed bundle from updating.
+- **The onelf job waits or fails on its environment.** The job uses the
+  `release` environment, which only `main` may use, so a release run
+  started from another branch is refused.
 - **No release PR appears.** The repository or organization does not let
   Actions create pull requests. See step 7 of `bootstrap-app`.
 - **A build job failed.** Re-run the failed jobs of the `release` run.
@@ -168,7 +202,10 @@ covers building, checking and debugging the image.
   `gh workflow run release.yml -f tag=v<version>`.
 - **`is published, so it is immutable`.** The run was started for a
   release that is already out. Published releases cannot change; ship
-  the fix as a new release.
+  the fix as a new release. Deleting the release does not free its
+  version either: a tag that belonged to a published immutable release
+  can never be created again. A draft's tag can, which is why a failed
+  build is fixed by deleting the draft and its tag.
 - **`Cannot upload assets to an immutable release`.** The release was
   published before its assets were attached: `git_release_draft = true`
   is missing from `.release-plz.toml`.
