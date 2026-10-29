@@ -1,4 +1,10 @@
 
+## [0.1.3](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.2...v0.1.3) - 2026-10-29
+
+### Miscellaneous Tasks
+
+- *(appimage)* Retry each pacman transaction three times - ([447e641](https://github.com/pkgforge-apps/blue-dove/commit/447e641d3079839440cb78ca853474e5b2f8377d))
+
 ## [0.1.2](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.1...v0.1.2) - 2026-10-29
 
 ### Features
