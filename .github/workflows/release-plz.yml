@@ -1,0 +1,21 @@
+name: release-plz
+
+# Copied from pkgforge-apps/.github by scripts/sync-guidelines.sh, which
+# also pins the shared workflow below to the revision it synced from.
+# The dispatch re-runs a release at an exact commit, such as a merge
+# whose push event failed to start this workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-plz:
+    uses: pkgforge-apps/.github/.github/workflows/app-release-plz.yml@b5c25eeecd616cf5802956045d8832691b5b814f
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      id-token: write

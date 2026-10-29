@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Blue Dove
+Comment=A fast simple music player
+Exec=blue-dove
+Icon=blue-dove
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=blue-dove

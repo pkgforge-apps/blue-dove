@@ -1,0 +1,53 @@
+name: appimage
+
+# Anylinux AppImage, built on demand rather than on every push. The
+# shared release workflow does not build one; see the anylinux-appimage
+# skill for how its assets reach a release.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runs-on }}
+    container: ghcr.io/pkgforge-dev/archlinux:latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs-on: ubuntu-latest, arch: x86_64 }
+          - { runs-on: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pkgforge-dev/anylinux-setup-action@ba7321e11074f9e387a0634e653d09b115d576cd # v6
+      # cpal links libasound, and the audio servers the image carries
+      # have to be installed before quick-sharun traces the binary.
+      - run: sh packaging/appimage/get-dependencies.sh
+      - id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: cargo build --release --locked
+      # The name says what the file is: an Anylinux AppImage for this
+      # architecture, not a build tied to one distribution.
+      - run: sh scripts/package-appimage.sh "anylinux-${{ matrix.arch }}" "${{ steps.version.outputs.version }}"
+        env:
+          # quick-sharun cannot see the ALSA plugins cpal reaches through
+          # libasound, so ask for the audio stack explicitly.
+          DEPLOY_PIPEWIRE: 1
+          DEPLOY_PULSE: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AppImage-${{ matrix.arch }}
+          # The trailing * keeps the .zsync, which the release needs too.
+          path: dist/*.AppImage*
+          if-no-files-found: error

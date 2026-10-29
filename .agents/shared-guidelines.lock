@@ -1,0 +1,21 @@
+# Written by scripts/sync-guidelines.sh. Do not edit.
+source pkgforge-apps/.github@b5c25eeecd616cf5802956045d8832691b5b814f
+skill add-dependency
+skill anylinux-appimage
+skill app-docs
+skill app-icon
+skill onelf
+skill release
+skill sync-guidelines
+skill test-linux-bundle
+file .github/workflows/ci.yml
+file .github/workflows/docs.yml
+file .github/workflows/release-plz.yml
+file .github/workflows/release.yml
+file scripts/check-ascii.sh
+file scripts/check.sh
+file scripts/icons.sh
+file scripts/package-appimage.sh
+file scripts/package-onelf.sh
+file scripts/package.sh
+file scripts/sync-guidelines.sh
