@@ -1,0 +1,8 @@
+# What the build links against on Debian and Ubuntu.
+#
+# cpal reaches ALSA through alsa-sys, which needs the headers and
+# pkg-config at build time. The runtime library is loaded by name from
+# the host, and the release bundles carry their own, so this is for
+# compiling only.
+libasound2-dev
+pkg-config

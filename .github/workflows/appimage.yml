@@ -1,0 +1,89 @@
+name: appimage
+
+# Anylinux AppImage, built when a release is published and on demand.
+#
+# The shared release workflow builds none for this app: its job installs
+# neither the audio servers nor the ALSA packages quick-sharun bundles
+# for them, and it has no way to pass DEPLOY_PIPEWIRE or DEPLOY_PULSE.
+# The images are attached here instead, after the shared workflow has
+# published the release, so the release has to take assets once it is
+# published: the organization's immutable releases are off. See the
+# anylinux-appimage skill.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to attach the images to; empty keeps them as workflow artifacts
+        required: false
+        type: string
+        default: ""
+  release:
+    types: [published]
+
+concurrency:
+  group: appimage-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runs-on }}
+    container:
+      image: ghcr.io/pkgforge-dev/archlinux:latest@sha256:782f92dd4cd2adee5544ec7fc53d06a9168489041fae13271b418123c858d5e7
+    permissions:
+      # Attaching the images to the published release is a write.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs-on: ubuntu-latest, arch: x86_64 }
+          - { runs-on: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: pkgforge-dev/anylinux-setup-action@ba7321e11074f9e387a0634e653d09b115d576cd # v6
+      # cpal links libasound, and the audio servers the image carries
+      # have to be installed before quick-sharun traces the binary.
+      - run: sh packaging/appimage/get-dependencies.sh
+      # Arch's Mesa is far larger than the debloated build, and this is
+      # what users download.
+      - run: get-debloated-pkgs --add-common --prefer-nano
+      # The setup action leaves the toolchain out; rustup itself is the
+      # Arch package.
+      - run: pacman -S --noconfirm --needed rustup
+      - run: rustup default stable
+      - id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: cargo build --release --locked
+      # The name says what the file is: an Anylinux AppImage for this
+      # architecture, not a build tied to one distribution.
+      - run: sh scripts/package-appimage.sh "anylinux-${{ matrix.arch }}" "${{ steps.version.outputs.version }}"
+        env:
+          # quick-sharun cannot see the ALSA plugins cpal reaches through
+          # libasound, so ask for the audio stack explicitly.
+          DEPLOY_PIPEWIRE: 1
+          DEPLOY_PULSE: 1
+      # A host with Mesa covers for an image without one, so only a run
+      # here says the image carries what it needs.
+      - name: Smoke run the AppImage
+        run: xvfb-run -a timeout 60 dist/*.AppImage --smoke
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AppImage-${{ matrix.arch }}
+          # The trailing * keeps the .zsync, which the release needs too.
+          path: dist/*.AppImage*
+          if-no-files-found: error
+      - name: Attach the images to the release
+        if: ${{ github.event.release.tag_name || inputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          gh release upload "$TAG" dist/*.AppImage dist/*.AppImage.zsync \
+            --clobber --repo "$GITHUB_REPOSITORY"

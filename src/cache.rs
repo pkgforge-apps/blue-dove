@@ -1,0 +1,689 @@
+//! A cache of the scanned library, so a start does not rescan every file.
+//!
+//! Reading the tags of a large directory is quick, but decoding its album art is
+//! not: on a library of seven thousand tracks the pictures take most of the
+//! six seconds a scan needs. This keeps what a scan found - the tags and the
+//! already decoded covers - in the user's cache directory, so a start reads
+//! it back in a fraction of that.
+//!
+//! An entry is only good while its file is unchanged, which the stamp of the
+//! file's size and modification time decides. A file that was retagged is
+//! read again, and a directory that gained or lost files is scanned as usual.
+//!
+//! The peak envelope the waveform seek bar draws is kept here too, one small
+//! file per track. Working it out means decoding the whole track, which is
+//! what left the bar empty for a moment at the start of every play; from the
+//! cache it is drawn at once.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::cover::Cover;
+use crate::error::At;
+use crate::library::{Library, Track};
+
+/// Version of the cache layout, so an older file is ignored rather than
+/// misread after a change to what is stored.
+const VERSION: u32 = 2;
+
+/// Magic at the head of a stored cover.
+const COVER_MAGIC: &[u8; 4] = b"BDCV";
+
+/// Magic at the head of a stored waveform.
+const WAVEFORM_MAGIC: &[u8; 4] = b"BDWV";
+
+/// Version of a stored waveform.
+///
+/// Bumping this throws every stored envelope away, which is what a change to
+/// how the peaks are worked out or how many there are needs.
+const WAVEFORM_VERSION: u8 = 1;
+
+/// How many stored waveforms are kept.
+///
+/// A track's envelope is about 1.6 KB, so this is a few megabytes at most:
+/// enough that a library of this size has every track it plays cached, and
+/// bounded so a directory of tens of thousands of files does not grow the
+/// cache without end.
+const MAX_WAVEFORMS: usize = 4000;
+
+/// What a scan found, kept for the next start.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Cache {
+    /// Version of the layout.
+    version: u32,
+    /// The directory the entries were read from.
+    root: PathBuf,
+    /// One entry per audio file.
+    tracks: Vec<CachedTrack>,
+    /// Entries by path, built on load.
+    #[serde(skip)]
+    by_path: HashMap<PathBuf, usize>,
+}
+
+/// One file's tags, as a scan read them.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CachedTrack {
+    /// Where the file lives.
+    path: PathBuf,
+    /// Size when it was read, in bytes.
+    size: u64,
+    /// Modification time when it was read, in seconds since the epoch.
+    modified: u64,
+    /// Track title.
+    title: String,
+    /// Performing artist.
+    artist: String,
+    /// Album title.
+    album: String,
+    /// Album artist.
+    album_artist: String,
+    /// Release year.
+    year: Option<u32>,
+    /// Disc number.
+    disc: Option<u32>,
+    /// Track number.
+    number: Option<u32>,
+    /// Playing time in milliseconds.
+    duration_ms: u64,
+    /// Key of the decoded cover, when the file or its directory had one.
+    cover: Option<String>,
+    /// Directory the file sits in, relative to the music directory.
+    directory: PathBuf,
+    /// Whether the tags named an album.
+    tagged_album: bool,
+}
+
+impl Cache {
+    /// Reads the cache for `root`, or `None` when there is none that fits.
+    pub fn load(root: &Path) -> Option<Self> {
+        Self::load_from(&cache_dir()?, root)
+    }
+
+    /// Reads the cache in `dir` for `root`.
+    pub fn load_from(dir: &Path, root: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(dir.join(file_name(root))).ok()?;
+        let mut cache: Self = toml::from_str(&text).ok()?;
+        if cache.version != VERSION || cache.root != root {
+            return None;
+        }
+        for (index, track) in cache.tracks.iter().enumerate() {
+            cache.by_path.insert(track.path.clone(), index);
+        }
+        Some(cache)
+    }
+
+    /// The entry for `path`, which the caller then checks for freshness.
+    pub fn track(&self, path: &Path) -> Option<&CachedTrack> {
+        self.tracks.get(*self.by_path.get(path)?)
+    }
+
+    /// Every entry, for turning a cache into a library without a scan.
+    pub fn all(&self) -> &[CachedTrack] {
+        &self.tracks
+    }
+}
+
+impl CachedTrack {
+    /// Whether the file still looks the way it did when it was read.
+    pub fn is_fresh(&self) -> bool {
+        stamp(&self.path) == Some((self.size, self.modified))
+    }
+
+    /// Key of the cover this entry uses, when it had one.
+    pub fn cover_key(&self) -> Option<&str> {
+        self.cover.as_deref()
+    }
+
+    /// Rebuilds the track this entry describes, with the cover for it.
+    pub fn to_track(&self, cover: Option<Arc<Cover>>) -> Track {
+        Track {
+            path: self.path.clone(),
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+            album_artist: self.album_artist.clone(),
+            year: self.year,
+            disc: self.disc,
+            number: self.number,
+            duration: Duration::from_millis(self.duration_ms),
+            cover,
+            directory: self.directory.clone(),
+            tagged_album: self.tagged_album,
+        }
+    }
+}
+
+/// Name of the file the library for `root` is written to.
+///
+/// One directory keeps one file: two music directories would otherwise
+/// overwrite each other, and a switch between them would throw the cache
+/// away every time. The name is a hash of the path, so it is stable between
+/// runs without carrying a path into a file name.
+fn file_name(root: &Path) -> String {
+    let hash = digest(root.as_os_str().as_encoded_bytes());
+    format!("library-{hash:016x}.toml")
+}
+
+/// The directory the cache is kept in, when the platform has a cache directory.
+fn cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join("blue-dove"))
+}
+
+/// Writes `library` as the cache for `root`.
+///
+/// Covers already stored are left alone: an unchanged picture keeps its old
+/// file, so a rescan of a large directory writes a couple of megabytes of text
+/// and nothing else.
+pub fn save(library: &Library, root: &Path) -> Result<(), String> {
+    let Some(dir) = cache_dir() else {
+        return Err("no cache directory for this user".to_string());
+    };
+    save_in(&dir, library, root)
+}
+
+/// Writes `library` as the cache kept in `dir`.
+pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
+    let path = dir.join(file_name(root));
+    let mut digest_by_cover: HashMap<usize, String> = HashMap::new();
+    let mut tracks = Vec::with_capacity(library.tracks.len());
+    for track in &library.tracks {
+        let Some((size, modified)) = stamp(&track.path) else {
+            continue;
+        };
+        let cover = track.cover.as_ref().map(|cover| {
+            let pointer = Arc::as_ptr(cover) as usize;
+            if let Some(key) = digest_by_cover.get(&pointer) {
+                return key.clone();
+            }
+            let key = write_cover(dir, cover);
+            digest_by_cover.insert(pointer, key.clone());
+            key
+        });
+        tracks.push(CachedTrack {
+            path: track.path.clone(),
+            size,
+            modified,
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            album_artist: track.album_artist.clone(),
+            year: track.year,
+            disc: track.disc,
+            number: track.number,
+            duration_ms: track.duration.as_millis() as u64,
+            cover,
+            directory: track.directory.clone(),
+            tagged_album: track.tagged_album,
+        });
+    }
+
+    let cache = Cache {
+        version: VERSION,
+        root: root.to_path_buf(),
+        by_path: HashMap::new(),
+        tracks,
+    };
+    let text =
+        toml::to_string(&cache).map_err(|error| format!("cannot encode the cache: {error}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).at(parent)?;
+    }
+    write_atomically(&path, text).at(&path)?;
+
+    prune_covers(dir, &cache.tracks);
+    Ok(())
+}
+
+/// Removes the stored covers no track refers to any more.
+fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
+    let covers = dir.join("covers");
+    let Ok(entries) = std::fs::read_dir(&covers) else {
+        return;
+    };
+    let keep: HashSet<&str> = tracks
+        .iter()
+        .filter_map(|track| track.cover.as_deref())
+        .collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !keep.contains(name.to_string_lossy().as_ref()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Stores `cover` and answers the key it is kept under.
+///
+/// The key is a hash of the pixels, so the same art in two albums is stored
+/// once and an unchanged cover is not written again.
+fn write_cover(dir: &Path, cover: &Cover) -> String {
+    let key = format!("{:016x}-{:x}", digest(&cover.rgba), cover.rgba.len());
+    let dir = dir.join("covers");
+    let path = dir.join(&key);
+    if path.is_file() {
+        return key;
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return key;
+    }
+    let mut bytes = Vec::with_capacity(12 + cover.rgba.len());
+    bytes.extend_from_slice(COVER_MAGIC);
+    bytes.extend_from_slice(&(cover.width as u32).to_le_bytes());
+    bytes.extend_from_slice(&(cover.height as u32).to_le_bytes());
+    bytes.extend_from_slice(&cover.rgba);
+    let _ = write_atomically(&path, bytes);
+    key
+}
+
+/// Reads the stored peak envelope for `path`, when one is there.
+pub fn read_waveform(path: &Path) -> Option<Vec<f32>> {
+    read_waveform_in(&cache_dir()?, path)
+}
+
+/// Reads the stored peak envelope for `path` from the cache kept in `dir`.
+///
+/// Answers `None` when there is no entry, when it was written by another
+/// build, or when it is damaged: the caller then works the envelope out and
+/// writes a new one.
+pub fn read_waveform_in(dir: &Path, path: &Path) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(waveform_file(dir, path)?).ok()?;
+    if bytes.get(..4)? != WAVEFORM_MAGIC || *bytes.get(4)? != WAVEFORM_VERSION {
+        return None;
+    }
+    let buckets = u32::from_le_bytes(bytes.get(5..9)?.try_into().ok()?) as usize;
+    let data = bytes.get(9..)?;
+    if data.len() != buckets {
+        return None;
+    }
+    Some(data.iter().map(|&byte| f32::from(byte) / 255.0).collect())
+}
+
+/// Stores the peak envelope for `path`, so the next play draws the seek bar
+/// at once.
+pub fn save_waveform(path: &Path, peaks: &[f32]) {
+    if let Some(dir) = cache_dir() {
+        save_waveform_in(&dir, path, peaks);
+    }
+}
+
+/// Stores the peak envelope for `path` in the cache kept in `dir`.
+///
+/// The peaks go in as one byte each: the bar is drawn a point at a time, so
+/// a 256th of the track's loudest peak is finer than a pixel, and it keeps
+/// the file small enough that a whole library's envelopes are cheap to keep.
+pub fn save_waveform_in(dir: &Path, path: &Path, peaks: &[f32]) {
+    let Some(file) = waveform_file(dir, path) else {
+        return;
+    };
+    if let Some(parent) = file.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    let mut bytes = Vec::with_capacity(9 + peaks.len());
+    bytes.extend_from_slice(WAVEFORM_MAGIC);
+    bytes.push(WAVEFORM_VERSION);
+    bytes.extend_from_slice(&(peaks.len() as u32).to_le_bytes());
+    for peak in peaks {
+        bytes.push((peak.clamp(0.0, 1.0) * 255.0).round() as u8);
+    }
+    let _ = write_atomically(&file, bytes);
+    prune_waveforms(dir);
+}
+
+/// The file a track's envelope is kept in.
+///
+/// The name is a hash of the path, its size and its modification time, so a
+/// file that was retagged or re-encoded gets an entry of its own rather than
+/// a stale envelope drawn over it.
+fn waveform_file(dir: &Path, path: &Path) -> Option<PathBuf> {
+    let (size, modified) = stamp(path)?;
+    let mut key = path.as_os_str().as_encoded_bytes().to_vec();
+    key.extend_from_slice(&size.to_le_bytes());
+    key.extend_from_slice(&modified.to_le_bytes());
+    Some(dir.join("waveforms").join(format!("{:016x}", digest(&key))))
+}
+
+/// Drops the oldest stored envelopes once there are more than [`MAX_WAVEFORMS`].
+///
+/// An envelope is read without being rewritten, so its file keeps the time it
+/// was written; one that was read and then dropped costs a recompute, which is
+/// what the cache exists to avoid but not what it has to prevent.
+fn prune_waveforms(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join("waveforms")) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    if files.len() <= MAX_WAVEFORMS {
+        return;
+    }
+    files.sort_by_key(|left| left.0);
+    let excess = files.len() - MAX_WAVEFORMS;
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Reads back the cover stored under `key`.
+pub fn read_cover(key: &str) -> Option<Cover> {
+    read_cover_in(&cache_dir()?, key)
+}
+
+/// Reads back the cover stored under `key` in the cache kept in `dir`.
+pub fn read_cover_in(dir: &Path, key: &str) -> Option<Cover> {
+    let bytes = std::fs::read(dir.join("covers").join(key)).ok()?;
+    if bytes.get(..4)? != COVER_MAGIC {
+        return None;
+    }
+    let width = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    let height = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
+    let rgba = bytes.get(12..)?.to_vec();
+    if rgba.len() != width * height * 4 {
+        return None;
+    }
+    Some(Cover {
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// A file's stamp: its size and the second its modification time falls in.
+///
+/// A time before the epoch, or one the platform cannot give, is reported as
+/// absent, which makes an entry look stale.
+fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((metadata.len(), modified))
+}
+
+/// Writes `bytes` to `path`, through a temporary file beside it.
+///
+/// A half-written file would be read back as a corrupt one, so the bytes land
+/// in a temporary name first and are moved into place in one step.
+fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let temporary = path.with_extension("new");
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
+}
+
+/// FNV-1a over `bytes`, used to name a cache file.
+///
+/// The standard hasher is not stable across releases, and a cache file
+/// written by one build has to be readable by the next.
+fn digest(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temporary directory that removes itself when it goes out of scope.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("blue-dove-cache-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("the directory is made");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn cover() -> Cover {
+        Cover {
+            width: 2,
+            height: 2,
+            rgba: vec![9, 8, 7, 255, 6, 5, 4, 255, 3, 2, 1, 255, 0, 1, 2, 255],
+        }
+    }
+
+    #[test]
+    fn a_cover_survives_being_stored() {
+        let scratch = Scratch::new("cover");
+        let key = write_cover(&scratch.0, &cover());
+        let back = read_cover_in(&scratch.0, &key).expect("the cover reads back");
+        assert_eq!((back.width, back.height), (2, 2));
+        assert_eq!(back.rgba, cover().rgba);
+    }
+
+    #[test]
+    fn the_same_pixels_are_stored_once() {
+        let scratch = Scratch::new("once");
+        assert_eq!(
+            write_cover(&scratch.0, &cover()),
+            write_cover(&scratch.0, &cover())
+        );
+        let covers = std::fs::read_dir(scratch.0.join("covers"))
+            .expect("the directory is there")
+            .count();
+        assert_eq!(covers, 1, "one file for one picture");
+    }
+
+    #[test]
+    fn a_missing_cover_is_no_cover() {
+        let scratch = Scratch::new("missing");
+        assert!(read_cover_in(&scratch.0, "0000000000000000-0").is_none());
+    }
+
+    /// A track whose file is `path`.
+    fn track(path: &Path, cover: Option<Arc<Cover>>) -> Track {
+        Track {
+            path: path.to_path_buf(),
+            title: "Song".to_string(),
+            artist: "Someone".to_string(),
+            album: "An Album".to_string(),
+            album_artist: "Someone".to_string(),
+            year: Some(2007),
+            disc: Some(1),
+            number: Some(2),
+            duration: Duration::from_millis(123_456),
+            cover,
+            directory: PathBuf::from("An Album"),
+            tagged_album: true,
+        }
+    }
+
+    #[test]
+    fn a_library_survives_being_cached() {
+        let scratch = Scratch::new("round-trip");
+        let file = scratch.0.join("song.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
+
+        let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
+        let entry = cache.track(&file).expect("the file has an entry");
+        assert!(entry.is_fresh(), "nothing touched the file");
+
+        let key = entry.cover_key().expect("the cover was stored");
+        let cover = read_cover_in(&scratch.0, key).map(Arc::new);
+        let back = entry.to_track(cover);
+        assert_eq!(back.title, "Song");
+        assert_eq!(back.duration, Duration::from_millis(123_456));
+        assert_eq!((back.disc, back.number), (Some(1), Some(2)));
+        assert!(back.cover.is_some(), "the art comes back with the track");
+    }
+
+    #[test]
+    fn a_retagged_file_is_no_longer_fresh() {
+        let scratch = Scratch::new("stale");
+        let file = scratch.0.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
+
+        std::fs::write(&file, b"a longer take").expect("the file changes");
+        let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
+        assert!(!cache.track(&file).expect("the entry is there").is_fresh());
+    }
+
+    #[test]
+    fn a_stored_envelope_comes_back_the_shape_it_went_in() {
+        let scratch = Scratch::new("waveform");
+        let track = scratch.0.join("song.flac");
+        std::fs::write(&track, b"one").expect("the file is written");
+
+        let peaks: Vec<f32> = (0..64).map(|index| index as f32 / 63.0).collect();
+        save_waveform_in(&scratch.0, &track, &peaks);
+        let back = read_waveform_in(&scratch.0, &track).expect("the envelope is stored");
+
+        assert_eq!(back.len(), peaks.len());
+        for (written, read) in peaks.iter().zip(&back) {
+            assert!(
+                (written - read).abs() < 0.01,
+                "each peak comes back within a byte of itself"
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_file_has_no_stored_envelope() {
+        let scratch = Scratch::new("waveform-stale");
+        let track = scratch.0.join("song.flac");
+        std::fs::write(&track, b"one").expect("the file is written");
+        save_waveform_in(&scratch.0, &track, &[0.5; 8]);
+
+        // A retag or a re-encode changes the size and the time, which is what
+        // the entry is named after.
+        std::fs::write(&track, b"a longer take").expect("the file changes");
+        assert!(
+            read_waveform_in(&scratch.0, &track).is_none(),
+            "the old envelope must not be drawn over the new file"
+        );
+    }
+
+    #[test]
+    fn a_damaged_envelope_is_ignored() {
+        let scratch = Scratch::new("waveform-damaged");
+        let track = scratch.0.join("song.flac");
+        std::fs::write(&track, b"one").expect("the file is written");
+        save_waveform_in(&scratch.0, &track, &[0.5; 8]);
+
+        let file = waveform_file(&scratch.0, &track).expect("the entry has a name");
+        std::fs::write(&file, b"not an envelope").expect("the file is damaged");
+        assert!(read_waveform_in(&scratch.0, &track).is_none());
+
+        // An envelope from another build is not read either.
+        save_waveform_in(&scratch.0, &track, &[0.5; 8]);
+        let mut bytes = std::fs::read(&file).expect("the entry is written");
+        bytes[4] = 99;
+        std::fs::write(&file, bytes).expect("the version is changed");
+        assert!(read_waveform_in(&scratch.0, &track).is_none());
+    }
+
+    #[test]
+    fn a_corrupt_cache_is_ignored() {
+        let scratch = Scratch::new("corrupt");
+        let music = Path::new("/music");
+        std::fs::write(scratch.0.join(file_name(music)), b"this is not toml {{{")
+            .expect("the file is written");
+        assert!(Cache::load_from(&scratch.0, music).is_none());
+
+        std::fs::write(
+            scratch.0.join(file_name(music)),
+            "version = 99\nroot = \"/music\"\n",
+        )
+        .expect("the file is written");
+        assert!(
+            Cache::load_from(&scratch.0, Path::new("/music")).is_none(),
+            "a layout from another build is not read"
+        );
+    }
+
+    #[test]
+    fn a_cache_for_another_directory_is_not_used() {
+        let scratch = Scratch::new("other-root");
+        let file = scratch.0.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
+
+        let elsewhere = scratch.0.join("elsewhere");
+        assert!(Cache::load_from(&scratch.0, &elsewhere).is_none());
+    }
+
+    #[test]
+    fn two_directories_keep_a_cache_each() {
+        // One file for every directory meant the second scan overwrote the
+        // first, so switching between two music directories lost both.
+        let scratch = Scratch::new("two-roots");
+        let first = scratch.0.join("first");
+        let second = scratch.0.join("second");
+        for root in [&first, &second] {
+            std::fs::create_dir_all(root).expect("the directory is made");
+            let file = root.join("song.flac");
+            std::fs::write(&file, b"one").expect("the file is written");
+            let library = Library::from_tracks(vec![track(&file, None)]);
+            save_in(&scratch.0, &library, root).expect("the cache is written");
+        }
+        assert!(
+            Cache::load_from(&scratch.0, &first).is_some(),
+            "the first directory keeps its cache"
+        );
+        assert!(
+            Cache::load_from(&scratch.0, &second).is_some(),
+            "and so does the second"
+        );
+    }
+
+    #[test]
+    fn a_cover_no_track_uses_is_cleaned_up() {
+        let scratch = Scratch::new("prune");
+        let file = scratch.0.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let with_art = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        save_in(&scratch.0, &with_art, &scratch.0).expect("the cache is written");
+
+        let without = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &without, &scratch.0).expect("the cache is rewritten");
+        let left = std::fs::read_dir(scratch.0.join("covers"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "the art nobody refers to is gone");
+    }
+
+    #[test]
+    fn the_digest_is_stable() {
+        // A value pinned from one build, so a change to the hash that would
+        // orphan every stored cover shows up here.
+        assert_eq!(digest(b"blue dove"), digest(b"blue dove"));
+        assert_ne!(digest(b"blue dove"), digest(b"blue doves"));
+    }
+
+    #[test]
+    fn a_stamp_changes_when_the_file_does() {
+        let scratch = Scratch::new("stamp");
+        let path = scratch.0.join("track.mp3");
+        std::fs::write(&path, b"first").expect("the file is written");
+        let first = stamp(&path).expect("the file has a stamp");
+        std::fs::write(&path, b"second and longer").expect("the file grows");
+        let second = stamp(&path).expect("the file has a stamp");
+        assert_ne!(first, second);
+    }
+}

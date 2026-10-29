@@ -1,0 +1,24 @@
+name: ci
+
+# Copied from pkgforge-apps/.github by scripts/sync-guidelines.sh, which
+# also pins the shared workflow below to the revision it synced from.
+# workflow_dispatch lets release-plz and the guidelines sync run this on
+# their pull requests, which a GITHUB_TOKEN push cannot trigger through
+# pull_request.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ci:
+    uses: pkgforge-apps/.github/.github/workflows/app-ci.yml@6b3bcf9fe1016b4cbd702c3bbc0968c72c63288e
+    permissions:
+      contents: read

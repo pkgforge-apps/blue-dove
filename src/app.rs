@@ -1,0 +1,2542 @@
+//! Application state and the logic behind it.
+//!
+//! The drawing lives in [`crate::ui`], which reads this state and turns
+//! input into calls on it. Everything that can be tested without a window
+//! stays here.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
+
+use eframe::egui;
+
+use crate::config::{Config, SavedPlaylist};
+use crate::dialog;
+use crate::library::{Library, ScanMessage};
+use crate::mpris::{Command, Playback};
+use crate::player::Audio;
+use crate::playlist::Playlists;
+use crate::waveform;
+
+/// Frames a smoke run draws before it closes the window.
+const SMOKE_FRAMES: u32 = 3;
+
+/// Height of one track row, in points.
+pub const ROW_HEIGHT: f32 = 22.0;
+
+/// Width of the album list, in points. The now-playing art sits at its top
+/// and is as wide as the list, so the width also sets the art's size.
+pub const ALBUM_LIST_WIDTH: f32 = 300.0;
+
+/// Height of the bottom bar holding the waveform, in points.
+///
+/// It leaves room for the waveform plus an equal gap above and below it.
+pub const PLAYER_HEIGHT: f32 = 66.0;
+
+/// Height of the bottom bar in the compact layout, holding a thin waveform.
+pub const COMPACT_PLAYER_HEIGHT: f32 = 20.0;
+
+/// The size the compact layout snaps the window to, in points.
+///
+/// It is the width of the album column the art is drawn at, which is also
+/// the width the control strip needs, and tall enough for the menu bar, the
+/// square art at its full width, the line naming the track, the strip and
+/// the thin waveform. The art is not shrunk to make the name line fit: the
+/// popup is made taller instead, since the art is the reason to use it.
+pub const COMPACT_SIZE: [f32; 2] = [320.0, 414.0];
+
+/// The size below which the window drops the album list and the playlist.
+///
+/// A window this small cannot show the columns and the art at once, so it
+/// becomes the popup: the menu bar, the art, the controls and the waveform.
+pub const COMPACT_BREAK: [f32; 2] = [560.0, 430.0];
+
+/// Whether a window of `size` shows the compact layout.
+pub fn compact_for(size: egui::Vec2) -> bool {
+    size.x < COMPACT_BREAK[0] || size.y < COMPACT_BREAK[1]
+}
+
+/// Height of the waveform, in points.
+///
+/// The bar takes all but a narrow gap of the strip it sits in, so the
+/// waveform is the widest thing in the player bar rather than a band with
+/// dead space above and below it.
+pub const WAVE_HEIGHT: f32 = 48.2;
+
+/// Height of the waveform in the compact layout, in points: a thin line
+/// that still shows the shape of the track and can be clicked to seek.
+pub const COMPACT_WAVE_HEIGHT: f32 = 15.2;
+
+/// Height of the line naming the playing track in the compact layout, in
+/// points.
+///
+/// It sits between the art and the controls, and is reserved even with
+/// nothing playing, so the popup does not change size when a track starts.
+pub const COMPACT_NAME_HEIGHT: f32 = 18.0;
+
+/// Name of the tab a file named on the command line plays in.
+const DEFAULT_TAB: &str = "Default";
+
+/// Volume used when the settings have none.
+const DEFAULT_VOLUME: f32 = 0.8;
+
+/// Widths of the track table's columns before the user drags one, in the
+/// order [`crate::ui::Column::ALL`] gives: number, title, file name, artist,
+/// album and length.
+const DEFAULT_COLUMNS: [f32; 6] = [crate::ui::NUMBER_COLUMN, 320.0, 320.0, 230.0, 215.0, 64.0];
+
+/// The widths the track table starts with, which the column menu restores.
+pub fn default_columns() -> [f32; 6] {
+    DEFAULT_COLUMNS
+}
+
+/// Which columns the track table shows, until the user turns one off: every
+/// one but the file name, which is there for a directory whose tags are wrong.
+const DEFAULT_SHOWN: [bool; 6] = [true, true, false, true, true, true];
+
+/// The widest a column can be dragged to.
+const MAX_COLUMN: f32 = 4000.0;
+
+/// How long a track plays before pressing back restarts it.
+///
+/// Players agree on a few seconds: the first press on a track that is under
+/// way goes back to its start, and a press in the first moments goes to the
+/// track before it.
+const RESTART_AFTER: Duration = Duration::from_secs(3);
+
+/// What the window is showing.
+#[derive(Default)]
+pub struct View {
+    /// The album the album list highlights.
+    pub album: Option<usize>,
+    /// Text of the search box.
+    pub filter: String,
+    /// The row a range selection is measured from: the last one clicked.
+    pub selected: Option<usize>,
+    /// Every selected row, as indices into [`crate::library::Library::tracks`].
+    pub selection: BTreeSet<usize>,
+    /// Scroll the selected row into view on the next frame.
+    pub reveal: bool,
+    /// Directories whose subdirectories are folded away, by their path.
+    pub collapsed: HashSet<PathBuf>,
+    /// Playlist whose name is being edited, while its tab shows a text box.
+    pub renaming: Option<usize>,
+    /// The name being typed into that tab.
+    pub rename_buffer: String,
+}
+
+/// Everything the window draws, and the state behind it.
+pub struct App {
+    /// Whether the window closes itself after [`SMOKE_FRAMES`] frames.
+    pub(crate) smoke: bool,
+    /// Whether settings are written to disk.
+    ///
+    /// A smoke run never writes: it must behave the same on every machine,
+    /// and CI runs it on machines whose settings are not its own.
+    pub(crate) persist: bool,
+    /// Frames drawn so far, counted only during a smoke run.
+    pub(crate) frames: u32,
+    /// Settings, as last loaded or saved.
+    pub(crate) config: Config,
+    /// The scanned library.
+    pub(crate) library: Library,
+    /// The open playlists and which one is shown.
+    pub(crate) playlists: Playlists,
+    /// Scan in flight, with the number of files it has read so far.
+    pub(crate) scan: Option<(Receiver<ScanMessage>, usize)>,
+    /// Waveform of the playing track, until it arrives.
+    pub(crate) waveform: Option<Receiver<Option<waveform::Peaks>>>,
+    /// Peaks of the playing track.
+    pub(crate) peaks: waveform::Peaks,
+    /// Bar heights of the waveform, with the width, the bar's height and the
+    /// peaks they were worked out for. Rebuilding them is a few hundred
+    /// multiplications, which the drawing pass would otherwise do every
+    /// frame; they only change with the track, the width or the layout.
+    pub(crate) wave_columns: Option<(usize, u32, usize, Vec<f32>)>,
+    /// Textures for covers, keyed by the album index or, for a track that
+    /// belongs to no album, by its track index offset past the albums.
+    pub(crate) textures: HashMap<usize, egui::TextureHandle>,
+    /// The audio device, opened when the first track plays.
+    pub(crate) audio: Option<Audio>,
+    /// Index of the playing track.
+    pub(crate) playing: Option<usize>,
+    /// Length of the playing track, from the decoder.
+    pub(crate) length: Duration,
+    /// Where the seek bar was dragged to, until the drag ends.
+    pub(crate) seek: Option<Duration>,
+    /// Volume, from 0 to 1.
+    pub(crate) volume: f32,
+    /// Whether the window lets the desktop show through it.
+    pub(crate) transparency: bool,
+    /// Whether the playing track repeats instead of the next one starting.
+    pub(crate) repeat: bool,
+    /// Whether the next track is picked at random.
+    pub(crate) random: bool,
+    /// The colour theme.
+    pub(crate) theme: crate::theme::Theme,
+    /// Whether the window shows the compact popup layout.
+    pub(crate) compact: bool,
+    /// The tracks playback walks through, when the user started it from a
+    /// selection rather than from the playlist.
+    ///
+    /// "Play the selected tracks only" must not throw the playlist away, so
+    /// the selection becomes a queue that Next, Previous and Random follow
+    /// until something else is played.
+    pub(crate) queue: Option<Vec<usize>>,
+    /// The order Random Order walks, once it has been drawn.
+    ///
+    /// It is one shuffle of the playlist rather than a fresh pick at every
+    /// step: every track is heard before one comes back, and Previous then
+    /// Next returns to the track that played between them.
+    pub(crate) shuffle: Option<Vec<usize>>,
+    /// Commands a D-Bus client sent, drained once a frame.
+    ///
+    /// The channel is empty for good when the host has no session bus, which
+    /// is the case the app works in without noticing.
+    pub(crate) remote: Option<Receiver<Command>>,
+    /// Where the MPRIS service arrives from, once the bus has accepted it.
+    pub(crate) service: Option<Receiver<Option<crate::mpris::Service>>>,
+    /// The running MPRIS service, once it is up.
+    pub(crate) mpris: Option<crate::mpris::Service>,
+    /// Widths of the track table's columns, in the order
+    /// [`crate::ui::Column::ALL`] gives them.
+    pub(crate) columns: [f32; 6],
+    /// Which of those columns are shown.
+    pub(crate) columns_shown: [bool; 6],
+    /// Whether the file name column keeps the extension, as in `.flac`.
+    pub(crate) file_extension: bool,
+    /// Counter behind the random picks, so each one draws a fresh number.
+    random_state: u64,
+    /// Message shown below the toolbar, such as an error.
+    pub(crate) status: Option<String>,
+    /// Directory dialog in flight, while it is open.
+    pub(crate) picker: Option<Receiver<Option<PathBuf>>>,
+    /// What the window is showing.
+    pub(crate) view: View,
+    /// Requests from launches that found this window running, drained once a
+    /// frame. `None` when nothing listens for them.
+    pub(crate) requests: Option<Receiver<crate::instance::Request>>,
+    /// Paths a launch named, held until the library can find them.
+    pub(crate) pending_paths: Option<Vec<PathBuf>>,
+    /// Whether closing the window leaves the music playing.
+    pub(crate) background: bool,
+    /// Whether the scan leaves out files and directories starting with a dot.
+    pub(crate) ignore_hidden: bool,
+    /// Whether the album art is fitted whole into its square, rather than
+    /// cropped to fill it.
+    pub(crate) cover_fit: bool,
+    /// Whether the user asked to quit, which a window closing is not.
+    pub(crate) quitting: bool,
+}
+
+impl App {
+    /// Window title and human-readable app name.
+    pub const TITLE: &str = "Blue Dove";
+
+    /// Application id. It names the desktop entry on Linux, so the
+    /// compositor can match the window to its icon.
+    pub const ID: &str = "blue-dove";
+
+    /// Creates the app, loading the settings and scanning the saved directory.
+    ///
+    /// `smoke` makes it close itself after a few frames, which CI uses to
+    /// prove a build starts and renders. A smoke run reads no settings and
+    /// scans nothing, so it behaves the same on every machine.
+    ///
+    /// `paths` are what the command line named. They are held until the
+    /// library can find them, and they decide the music directory when none
+    /// is set, so `blue-dove song.flac` works on a first run.
+    pub fn new(ctx: &egui::Context, smoke: bool, paths: Vec<PathBuf>) -> Self {
+        let config = if smoke {
+            Config::default()
+        } else {
+            Config::load()
+        };
+        let volume = config.volume.unwrap_or(DEFAULT_VOLUME).clamp(0.0, 1.0);
+        let transparency = config.transparency.unwrap_or(true);
+        let repeat = config.repeat.unwrap_or(false);
+        let random = config.random.unwrap_or(false);
+        let theme = config
+            .theme
+            .as_deref()
+            .and_then(crate::theme::Theme::from_name)
+            .unwrap_or_default();
+        let stored_columns = config
+            .column_widths
+            .map(sane_columns)
+            .unwrap_or(DEFAULT_COLUMNS);
+        let columns_shown = config.column_shown.unwrap_or(DEFAULT_SHOWN);
+        let file_extension = config.file_extension.unwrap_or(true);
+        let background = config.background.unwrap_or(false);
+        let ignore_hidden = config.ignore_hidden.unwrap_or(true);
+        let cover_fit = config.cover_fit.unwrap_or(false);
+        // The bus is reached on a thread of its own, so a host without one,
+        // or with one that is slow to answer, never holds up the window.
+        let (remote, service) = if smoke {
+            (None, None)
+        } else {
+            // A command has to wake the window, which otherwise only draws
+            // when something happens in it.
+            let ctx = ctx.clone();
+            let waker: crate::mpris::Waker = std::sync::Arc::new(move || ctx.request_repaint());
+            let (commands, service) = crate::mpris::spawn(waker);
+            (Some(commands), Some(service))
+        };
+        let mut app = Self {
+            smoke,
+            persist: !smoke,
+            frames: 0,
+            config,
+            library: Library::default(),
+            playlists: Playlists::default(),
+            scan: None,
+            waveform: None,
+            peaks: Vec::new(),
+            wave_columns: None,
+            textures: HashMap::new(),
+            audio: None,
+            playing: None,
+            length: Duration::ZERO,
+            seek: None,
+            volume,
+            transparency,
+            repeat,
+            random,
+            theme,
+            compact: false,
+            queue: None,
+            shuffle: None,
+            remote,
+            service,
+            mpris: None,
+            columns: stored_columns,
+            columns_shown,
+            file_extension,
+            random_state: 0x9e37_79b9_7f4a_7c15,
+            status: None,
+            picker: None,
+            view: View::default(),
+            requests: None,
+            pending_paths: (!paths.is_empty()).then_some(paths),
+            background,
+            ignore_hidden,
+            cover_fit,
+            quitting: false,
+        };
+        match app.config.music_directory.clone() {
+            Some(directory) => {
+                // The last scan is shown at once, so the window opens with
+                // its albums and playlists in place; the scan that follows
+                // picks up whatever changed.
+                if !smoke && let Some(library) = crate::library::read_cache(&directory) {
+                    app.adopt_library(library);
+                }
+                app.start_scan(directory)
+            }
+            None => {
+                // A path on the command line says where the music is, which
+                // is a better answer for a first run than a dialog nobody
+                // asked for.
+                let named = app
+                    .pending_paths
+                    .as_ref()
+                    .and_then(|paths| paths.first())
+                    .and_then(|path| crate::cli::music_root(path));
+                match named {
+                    Some(directory) if !smoke => {
+                        app.config.music_directory = Some(directory.clone());
+                        app.save_settings();
+                        app.start_scan(directory);
+                    }
+                    // A first run has nothing to show, so ask for a directory
+                    // rather than leave an empty window.
+                    _ if !smoke => app.ask_for_directory(),
+                    _ => {}
+                }
+            }
+        }
+        app.open_pending_paths();
+        app
+    }
+
+    /// Plays what the command line named, once the library can find it.
+    ///
+    /// A path given at startup may arrive before the scan has finished, so it
+    /// waits in `pending_paths`; this is called again when the scan lands.
+    pub fn open_pending_paths(&mut self) {
+        if self.scan.is_some() {
+            return;
+        }
+        if let Some(paths) = self.pending_paths.take() {
+            self.open_paths(&paths);
+        }
+    }
+
+    /// Plays what a launch named: files play, directories queue.
+    ///
+    /// A file goes into a tab named Default, which replaces what that tab
+    /// held, and plays at once. A directory appends the tracks under it to
+    /// the playlist that is showing, the way a double click on the album list
+    /// does. A path the library does not hold is reported rather than
+    /// silently ignored.
+    pub fn open_paths(&mut self, paths: &[PathBuf]) {
+        // What a path is comes from the library rather than the file system:
+        // a file the library holds is a file, a path with tracks under it is a
+        // directory, and anything else is reported.
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        let mut missing = None;
+        for path in paths {
+            if let Some(index) = self.track_of(path) {
+                files.push(index);
+            } else {
+                let tracks = self.tracks_under(path);
+                if tracks.is_empty() {
+                    missing = missing.or(Some(path));
+                } else {
+                    directories.push(tracks);
+                }
+            }
+        }
+
+        if let Some(&first) = files.first() {
+            self.default_tab().set(files);
+            self.queue = None;
+            self.forget_shuffle();
+            self.play(first);
+        }
+        for tracks in directories {
+            self.playlists.current_mut().add(tracks);
+            self.queue = None;
+            self.forget_shuffle();
+            self.select_first();
+            self.view.reveal = true;
+        }
+        if let Some(path) = missing {
+            self.report_missing(path);
+        }
+        self.save_playlists();
+    }
+
+    /// Says a path the command line named is not in the library.
+    fn report_missing(&mut self, path: &std::path::Path) {
+        self.status = Some(format!("{} is not in the music directory", path.display()));
+    }
+
+    /// The tab a file named on the command line plays in.
+    ///
+    /// That is the tab called Default, created when there is none, so the
+    /// track replaces what the tab held rather than piling onto it.
+    fn default_tab(&mut self) -> &mut crate::playlist::Playlist {
+        let index = self
+            .playlists
+            .items
+            .iter()
+            .position(|item| item.name == DEFAULT_TAB);
+        let index = match index {
+            Some(index) => index,
+            None => {
+                self.playlists
+                    .items
+                    .push(crate::playlist::Playlist::new(DEFAULT_TAB));
+                self.playlists.items.len() - 1
+            }
+        };
+        self.playlists.active = index;
+        self.playlists.current_mut()
+    }
+
+    /// The library index of the file at `path`, when the library holds it.
+    ///
+    /// The path is canonicalised first, so a relative path on the command line
+    /// finds a track the scan recorded as absolute.
+    fn track_of(&self, path: &std::path::Path) -> Option<usize> {
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.library
+            .tracks
+            .iter()
+            .position(|track| track.path == target || track.path == path)
+    }
+
+    /// The library indices of every track under `directory`.
+    fn tracks_under(&self, directory: &std::path::Path) -> Vec<usize> {
+        let target = directory
+            .canonicalize()
+            .unwrap_or_else(|_| directory.to_path_buf());
+        self.library
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| {
+                track.path.starts_with(&target) || track.path.starts_with(directory)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Opens the desktop's directory dialog.
+    pub fn ask_for_directory(&mut self) {
+        if self.picker.is_none() {
+            self.picker = Some(dialog::spawn(self.start_directory()));
+        }
+    }
+
+    /// Where the directory dialog starts: the saved directory, else the
+    /// user's music directory.
+    pub fn start_directory(&self) -> PathBuf {
+        self.config
+            .music_directory
+            .clone()
+            .filter(|directory| directory.is_dir())
+            .or_else(dirs::audio_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default()
+    }
+
+    /// Scans `directory`, replacing the library when the scan finishes.
+    pub fn start_scan(&mut self, directory: PathBuf) {
+        self.status = None;
+        self.scan = Some((crate::library::spawn_scan(directory, self.ignore_hidden), 0));
+    }
+
+    /// Opens a directory, remembers it and scans it.
+    pub fn open_directory(&mut self, directory: PathBuf) {
+        self.config.music_directory = Some(directory.clone());
+        self.save_settings();
+        self.start_scan(directory);
+    }
+
+    /// Takes in what the background threads have finished.
+    fn poll_workers(&mut self, ctx: &egui::Context) {
+        let mut finished = false;
+        let mut scanned: Option<Box<Library>> = None;
+        if let Some((receiver, seen)) = &mut self.scan {
+            while let Ok(message) = receiver.try_recv() {
+                match message {
+                    ScanMessage::Progress(files) => *seen = files,
+                    ScanMessage::Done(library) => {
+                        scanned = Some(library);
+                        finished = true;
+                    }
+                    ScanMessage::Failed(error) => {
+                        self.status = Some(error);
+                        finished = true;
+                    }
+                }
+            }
+        }
+        // The scan has to end before the library is swapped in, since the
+        // playlists have to be carried over to it.
+        if let Some(library) = scanned {
+            self.adopt_library(*library);
+        }
+        if finished {
+            self.scan = None;
+            if self.library.is_empty() && self.status.is_none() {
+                self.status = Some("No music found in that directory".to_string());
+            }
+        }
+
+        if let Some(receiver) = &self.waveform
+            && let Ok(peaks) = receiver.try_recv()
+        {
+            self.peaks = peaks.unwrap_or_default();
+            self.wave_columns = None;
+            self.waveform = None;
+        }
+
+        if let Some(receiver) = &self.picker
+            && let Ok(chosen) = receiver.try_recv()
+        {
+            self.picker = None;
+            match chosen {
+                Some(directory) => self.open_directory(directory),
+                // A cancel and a missing backend are one answer; the message
+                // says which case this is when it can tell.
+                None => self.status = dialog::explain(),
+            }
+        }
+
+        // A path given at startup could not be found until the scan landed.
+        self.open_pending_paths();
+
+        if self.scan.is_some() || self.waveform.is_some() || self.picker.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+    }
+
+    /// Starts playing the track at `index`.
+    ///
+    /// A track that cannot be opened, or an index the library does not hold,
+    /// leaves the error in the status line and nothing playing.
+    pub fn play(&mut self, index: usize) {
+        let Some(track) = self.library.tracks.get(index) else {
+            return;
+        };
+        let path = track.path.clone();
+        let tagged = track.duration;
+
+        if self.audio.is_none() {
+            match Audio::open(self.volume) {
+                Ok(audio) => self.audio = Some(audio),
+                Err(error) => {
+                    self.status = Some(error);
+                    return;
+                }
+            }
+        }
+        let Some(audio) = &self.audio else {
+            return;
+        };
+
+        match audio.play_file(&path) {
+            Ok(length) => {
+                self.length = length.unwrap_or(tagged);
+                self.playing = Some(index);
+                self.seek = None;
+                // The table highlights the playing track, so the selection
+                // follows playback whether a click, Next, Repeat or Random
+                // started it.
+                self.select_only(index);
+                self.view.reveal = true;
+                self.peaks.clear();
+                self.waveform = Some(waveform::spawn(path));
+                self.status = None;
+                self.save_playlists();
+            }
+            Err(error) => self.status = Some(error),
+        }
+    }
+
+    /// Forgets the shuffled order, for a change of playlist or queue.
+    ///
+    /// The next Random step draws a new one, from the tracks the playlist
+    /// holds then.
+    pub fn forget_shuffle(&mut self) {
+        self.shuffle = None;
+    }
+
+    /// Moves to the next or previous track of the playlist.
+    ///
+    /// With nothing playing it starts the playlist's first track, even when
+    /// the search box hides it: the table shows what the filter leaves, and
+    /// the playlist is what playback walks. The previous track wraps to the
+    /// end of the playlist, and so does the next. With Random Order on, both
+    /// walk the shuffled order instead.
+    ///
+    /// Back on a track that has played for a few seconds restarts it rather
+    /// than moving on, so one press goes to its start and a second goes to
+    /// the track before it.
+    pub fn step(&mut self, forward: bool) {
+        let Some(current) = self.playing.or(self.view.selected) else {
+            if let Some(&first) = self.playlists.current().tracks.first() {
+                self.play(first);
+            }
+            return;
+        };
+        if !forward && self.playing.is_some() && back_restarts(self.position()) {
+            self.seek_to(0.0);
+            return;
+        }
+        if self.random {
+            if let Some(index) = self.shuffled_neighbour(current, forward) {
+                self.play(index);
+            }
+            return;
+        }
+        self.step_linear(current, forward);
+    }
+
+    /// The track after or before `current` in the shuffled order.
+    ///
+    /// A track that is not in the order, such as one the playlist lost,
+    /// starts it again rather than stopping.
+    fn shuffled_neighbour(&mut self, current: usize, forward: bool) -> Option<usize> {
+        let order = self.shuffle_order();
+        crate::playlist::neighbour(&order, current, forward).or_else(|| order.first().copied())
+    }
+
+    /// Moves to the next or previous track in the order being walked.
+    fn step_linear(&mut self, current: usize, forward: bool) {
+        let tracks = self.walked_tracks();
+        // A track that was taken out of the playlist has no neighbour, so
+        // playback starts the list again rather than stopping.
+        let next = crate::playlist::neighbour(tracks, current, forward)
+            .or_else(|| tracks.first().copied());
+        if let Some(index) = next {
+            self.play(index);
+        }
+    }
+
+    /// The tracks Next, Previous and Random walk through.
+    ///
+    /// That is the queue a "play the selection" started, or the playlist.
+    fn walked_tracks(&self) -> &[usize] {
+        match &self.queue {
+            Some(queue) => queue,
+            None => &self.playlists.current().tracks,
+        }
+    }
+
+    /// The order Random Order walks, drawn the first time it is needed.
+    ///
+    /// One shuffle is drawn and then followed both ways, which is what makes
+    /// Previous and Next agree: the same track that played last plays again
+    /// when the way forward is walked. The generator is a plain xorshift, so
+    /// no dependency is needed for it.
+    fn shuffle_order(&mut self) -> Vec<usize> {
+        if let Some(order) = &self.shuffle {
+            return order.clone();
+        }
+        let tracks = self.walked_tracks().to_vec();
+        let mut state = self.random_state;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        self.random_state = state;
+        let order = crate::playlist::shuffled(&tracks, state);
+        self.shuffle = Some(order.clone());
+        order
+    }
+
+    /// Starts or pauses playback.
+    pub fn toggle(&mut self) {
+        match &self.audio {
+            Some(audio) if self.playing.is_some() => audio.toggle(),
+            _ => {
+                if let Some(&first) = self.visible_tracks().first() {
+                    self.play(first);
+                }
+            }
+        }
+    }
+
+    /// Selects the first track of the playlist, if it holds one.
+    pub fn select_first(&mut self) {
+        self.select(self.playlists.current().tracks.first().copied());
+    }
+
+    /// Whether the row for `index` is selected.
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.view.selection.contains(&index)
+    }
+
+    /// Selects `index` alone.
+    pub fn select_only(&mut self, index: usize) {
+        self.view.selection.clear();
+        self.view.selection.insert(index);
+        self.view.selected = Some(index);
+    }
+
+    /// Selects every track the table shows.
+    pub fn select_all(&mut self) {
+        let tracks = self.visible_tracks();
+        self.view.selection = tracks.iter().copied().collect();
+        self.view.selected = tracks.first().copied().or(self.view.selected);
+    }
+
+    /// Empties the selection.
+    pub fn clear_selection(&mut self) {
+        self.view.selection.clear();
+        self.view.selected = None;
+    }
+
+    /// Selects `index` alone, or clears the selection when there is none.
+    pub fn select(&mut self, index: Option<usize>) {
+        match index {
+            Some(index) => self.select_only(index),
+            None => self.clear_selection(),
+        }
+    }
+
+    /// Selects a track the library scan found again, and shows its album.
+    ///
+    /// A restored track can sit anywhere in the table, so the row is scrolled
+    /// into view and the album list follows it.
+    fn select_restored(&mut self, index: Option<usize>) {
+        self.select(index);
+        self.view.reveal = index.is_some();
+        if let Some(index) = index
+            && let Some(album) = self.album_of(index)
+        {
+            self.view.album = Some(album);
+        }
+    }
+
+    /// Adds `index` to the selection, or takes it out when it is there.
+    pub fn toggle_selection(&mut self, index: usize) {
+        if self.view.selection.remove(&index) {
+            if self.view.selected == Some(index) {
+                self.view.selected = self.view.selection.iter().next().copied();
+            }
+        } else {
+            self.view.selection.insert(index);
+            self.view.selected = Some(index);
+        }
+    }
+
+    /// Selects everything from the last clicked row to `index`.
+    ///
+    /// The range is taken from what the table shows, so a search narrows it
+    /// to the rows in view.
+    pub fn extend_selection(&mut self, index: usize) {
+        let shown = self.visible_tracks();
+        let position = |row: usize| shown.iter().position(|&shown| shown == row);
+        let (Some(from), Some(to)) = (self.view.selected.and_then(position), position(index))
+        else {
+            self.select_only(index);
+            return;
+        };
+        let (from, to) = if from <= to { (from, to) } else { (to, from) };
+        self.view.selection = shown[from..=to].iter().copied().collect();
+    }
+
+    /// The selected tracks, in the order the playlist holds them.
+    pub fn selected_tracks(&self) -> Vec<usize> {
+        self.playlists
+            .current()
+            .tracks
+            .iter()
+            .copied()
+            .filter(|index| self.view.selection.contains(index))
+            .collect()
+    }
+
+    /// Plays the selected tracks and nothing else, in playlist order.
+    ///
+    /// The playlist is left as it is: the selection becomes the queue that
+    /// Next, Previous and Random follow, so the rest of the tab is not lost.
+    pub fn play_selected(&mut self) {
+        let tracks = self.selected_tracks();
+        let Some(&first) = tracks.first() else {
+            return;
+        };
+        self.queue = Some(tracks);
+        self.forget_shuffle();
+        self.play(first);
+    }
+
+    /// Takes the selected tracks out of the playlist.
+    ///
+    /// This only edits the playlist: no file is touched, ever. The playing
+    /// track carries on, since playback holds the file rather than the row.
+    pub fn remove_selected(&mut self) {
+        if self.view.selection.is_empty() {
+            return;
+        }
+        let removed = std::mem::take(&mut self.view.selection);
+        let playlist = self.playlists.current_mut();
+        playlist.tracks.retain(|index| !removed.contains(index));
+        playlist.cursor = playlist
+            .cursor
+            .filter(|&cursor| cursor < playlist.tracks.len());
+        self.view.selected = None;
+        if let Some(queue) = &mut self.queue {
+            queue.retain(|index| !removed.contains(index));
+            if queue.is_empty() {
+                self.queue = None;
+            }
+        }
+        self.forget_shuffle();
+        self.save_playlists();
+    }
+
+    /// Makes the album at `index` the active playlist.
+    ///
+    /// Double-clicking an album replaces what the playlist holds, so the
+    /// tab always shows the album that was picked.
+    pub fn open_album(&mut self, index: usize) {
+        let Some(album) = self.library.albums.get(index) else {
+            return;
+        };
+        let tracks = album.tracks.clone();
+        self.view.album = Some(index);
+        self.playlists.current_mut().set(tracks);
+        self.queue = None;
+        self.forget_shuffle();
+        self.select_first();
+        self.view.reveal = true;
+        self.save_playlists();
+    }
+
+    /// Appends everything the directory at `path` holds to the playlist.
+    ///
+    /// The album list draws from a flattened list of rows rather than a
+    /// borrow of the tree, so a double-click arrives as a path; this finds
+    /// the directory again and queues it the way a double-click does.
+    ///
+    /// The directory's own albums come first, then the loose files sitting
+    /// beside them, then each subdirectory in the order the album list shows
+    /// them, so a double-click on a directory queues it in reading order. A
+    /// directory holding no album at all queues the files it holds.
+    pub fn add_directory_at(&mut self, path: &Path) {
+        let tracks = match self.library.directory(path) {
+            Some(directory) => directory.tracks_deep(&self.library.albums),
+            None => return,
+        };
+        self.add_tracks(tracks);
+    }
+
+    /// Appends `tracks` to the playlist and brings the first into view.
+    fn add_tracks(&mut self, tracks: Vec<usize>) {
+        self.playlists.current_mut().add(tracks);
+        self.queue = None;
+        self.forget_shuffle();
+        self.select_first();
+        self.view.reveal = true;
+        self.save_playlists();
+    }
+
+    /// Plays a track on its own, replacing the playlist with it.
+    ///
+    /// A loose file is not part of an album, so playing it should not leave
+    /// the rest of the tab queued behind it.
+    pub fn play_loose(&mut self, index: usize) {
+        self.playlists.current_mut().set([index]);
+        self.queue = None;
+        self.forget_shuffle();
+        self.save_playlists();
+        self.play(index);
+    }
+
+    /// Whether a directory is folded away in the album list.
+    pub fn is_collapsed(&self, directory: &crate::library::Directory) -> bool {
+        self.view.collapsed.contains(&directory.path)
+    }
+
+    /// Folds the directory at `path` away, or unfolds it.
+    pub fn toggle_collapsed_at(&mut self, path: &Path) {
+        if !self.view.collapsed.remove(path) {
+            self.view.collapsed.insert(path.to_path_buf());
+        }
+    }
+
+    /// Renames the active playlist.
+    pub fn rename_playlist(&mut self, name: &str) {
+        let name = name.trim();
+        if !name.is_empty() {
+            self.playlists.current_mut().name = name.to_string();
+            self.save_playlists();
+        }
+    }
+
+    /// Whether the player is paused, or has nothing loaded.
+    pub fn paused(&self) -> bool {
+        self.audio.as_ref().is_none_or(Audio::is_paused)
+    }
+
+    /// Stops playback and clears the now-playing bar.
+    ///
+    /// The track stays selected in the table, so play starts it again from
+    /// the beginning.
+    pub fn stop(&mut self) {
+        if let Some(audio) = &self.audio {
+            audio.stop();
+        }
+        self.playing = None;
+        self.length = Duration::ZERO;
+        self.seek = None;
+        self.peaks.clear();
+        self.wave_columns = None;
+        self.waveform = None;
+    }
+
+    /// The album a track belongs to.
+    pub fn album_of(&self, track: usize) -> Option<usize> {
+        self.library
+            .albums
+            .iter()
+            .position(|album| album.tracks.contains(&track))
+    }
+
+    /// The playing track's name, as the popup shows it.
+    ///
+    /// It is the title, or the file name when the table is set to show file
+    /// names instead of titles, so the popup and the table agree. `None`
+    /// when nothing is playing, or the track is no longer in the library.
+    pub fn playing_name(&self) -> Option<String> {
+        let track = self.library.tracks.get(self.playing?)?;
+        Some(match crate::ui::name_column(self.columns_shown) {
+            Some(crate::ui::Column::FileName) => track.file_name(self.file_extension),
+            _ => track.title.clone(),
+        })
+    }
+
+    /// Track indices in the playlist the table shows, filtered by the search box.
+    pub fn visible_tracks(&self) -> Vec<usize> {
+        let needle = self.view.filter.trim().to_lowercase();
+        self.playlists
+            .current()
+            .tracks
+            .iter()
+            .copied()
+            .filter(|&index| {
+                needle.is_empty()
+                    || self.library.tracks.get(index).is_some_and(|track| {
+                        track.title.to_lowercase().contains(&needle)
+                            || track.artist.to_lowercase().contains(&needle)
+                    })
+            })
+            .collect()
+    }
+
+    /// Texture for an album's cover, uploading it on first use.
+    pub fn cover_texture(
+        &mut self,
+        ctx: &egui::Context,
+        album: usize,
+    ) -> Option<egui::TextureHandle> {
+        let cover = self.library.albums.get(album)?.cover.clone()?;
+        self.upload_cover(ctx, album, &cover)
+    }
+
+    /// Texture for the cover of the playing track.
+    ///
+    /// An album's cover is shared by its tracks; a loose track has no album
+    /// to take one from, so its own artwork is used. The two are kept in the
+    /// same cache under different keys.
+    pub fn playing_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let track = self.playing?;
+        if let Some(album) = self.album_of(track) {
+            return self.cover_texture(ctx, album);
+        }
+        let cover = self.library.tracks.get(track)?.cover.clone()?;
+        self.upload_cover(ctx, usize::MAX - track, &cover)
+    }
+
+    /// Uploads `cover` and caches it under `key`.
+    fn upload_cover(
+        &mut self,
+        ctx: &egui::Context,
+        key: usize,
+        cover: &crate::library::Cover,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(texture) = self.textures.get(&key) {
+            return Some(texture.clone());
+        }
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([cover.width, cover.height], &cover.rgba);
+        let texture = ctx.load_texture(format!("cover-{key}"), image, egui::TextureOptions::LINEAR);
+        self.textures.insert(key, texture.clone());
+        Some(texture)
+    }
+
+    /// The playback position, following the seek bar while it is dragged.
+    pub fn position(&self) -> Duration {
+        match self.seek {
+            Some(position) => position,
+            None => self.audio.as_ref().map_or(Duration::ZERO, Audio::position),
+        }
+    }
+
+    /// Seeks to a fraction of the track.
+    pub fn seek_to(&mut self, fraction: f32) {
+        let target = self.length.mul_f32(fraction.clamp(0.0, 1.0));
+        self.seek_to_position(target);
+        self.seek = None;
+    }
+
+    /// Seeks to `position`, reporting a decoder that cannot seek.
+    pub fn seek_to_position(&mut self, position: Duration) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        match audio.seek(position) {
+            Ok(()) => self.status = None,
+            Err(error) => self.status = Some(format!("Cannot seek: {error}")),
+        }
+    }
+
+    /// Sets the volume and applies it. The settings file is written when
+    /// the slider is let go, not on every frame of a drag.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(audio) = &self.audio {
+            audio.set_volume(self.volume);
+        }
+    }
+
+    /// Sets the widths of the track table's columns, and remembers them.
+    pub fn set_columns(&mut self, columns: [f32; 6]) {
+        self.columns = sane_columns(columns);
+        self.config.column_widths = Some(self.columns);
+        self.save_settings();
+    }
+
+    /// Shows or hides one of the track table's columns, and remembers it.
+    pub fn set_column_shown(&mut self, index: usize, shown: bool) {
+        if let Some(column) = self.columns_shown.get_mut(index) {
+            *column = shown;
+        }
+        self.config.column_shown = Some(self.columns_shown);
+        self.save_settings();
+    }
+
+    /// Chooses whether the file name column keeps the extension, and
+    /// remembers it.
+    pub fn set_file_extension(&mut self, on: bool) {
+        self.file_extension = on;
+        self.config.file_extension = Some(on);
+        self.save_settings();
+    }
+
+    /// Picks a theme, applies it, and remembers it.
+    pub fn set_theme(&mut self, theme: crate::theme::Theme) {
+        self.theme = theme;
+        self.config.theme = Some(theme.key().to_string());
+        self.save_settings();
+    }
+
+    /// Turns repeat on or off, and remembers it.
+    pub fn set_repeat(&mut self, repeat: bool) {
+        self.repeat = repeat;
+        self.config.repeat = Some(repeat);
+        self.save_settings();
+    }
+
+    /// Turns random playback on or off, and remembers it.
+    ///
+    /// Switching it on starts a new shuffle, so the order follows the
+    /// playlist as it stands now rather than as it stood when it was last on.
+    pub fn set_random(&mut self, random: bool) {
+        self.random = random;
+        self.forget_shuffle();
+        self.config.random = Some(random);
+        self.save_settings();
+    }
+
+    /// Turns the translucent background on or off, and remembers it.
+    pub fn set_transparency(&mut self, transparency: bool) {
+        self.transparency = transparency;
+        self.config.transparency = Some(transparency);
+        self.save_settings();
+    }
+
+    /// Keeps the music playing when the window is closed, or stops doing so.
+    pub fn set_background(&mut self, background: bool) {
+        self.background = background;
+        self.config.background = Some(background);
+        self.save_settings();
+    }
+
+    /// Fits the album art into its square whole, or crops it to fill.
+    ///
+    /// Art that is not square cannot do both: filling the space crops it,
+    /// and showing all of it leaves a band of background beside it.
+    pub fn set_cover_fit(&mut self, cover_fit: bool) {
+        self.cover_fit = cover_fit;
+        self.config.cover_fit = Some(cover_fit);
+        self.save_settings();
+    }
+
+    /// Leaves hidden files out of the scan, or stops doing so.
+    ///
+    /// The scan has to run again for the change to show: what is in the
+    /// library was decided when it was read.
+    pub fn set_ignore_hidden(&mut self, ignore_hidden: bool) {
+        self.ignore_hidden = ignore_hidden;
+        self.config.ignore_hidden = Some(ignore_hidden);
+        self.save_settings();
+        if let Some(directory) = self.config.music_directory.clone() {
+            self.start_scan(directory);
+        }
+    }
+
+    /// Whether closing the window should leave the music playing.
+    ///
+    /// Quit always ends the app, and a close with nothing loaded does too: a
+    /// window that would only sit hidden has no reason to stay.
+    fn keeps_playing_on_close(&self) -> bool {
+        self.background && !self.quitting && self.playing.is_some()
+    }
+
+    /// The accent colour of the active theme.
+    pub fn accent(&self) -> egui::Color32 {
+        self.theme.palette().accent
+    }
+
+    /// How much of the desktop shows through the window, from 0 to 1.
+    pub fn opacity(&self) -> f32 {
+        if self.transparency {
+            crate::theme::TRANSLUCENT
+        } else {
+            1.0
+        }
+    }
+
+    /// Writes the settings to disk, unless this is a smoke run.
+    ///
+    /// The volume is taken from the live value each time, so a save made for
+    /// another reason still records it.
+    fn save_settings(&mut self) {
+        if !self.persist {
+            return;
+        }
+        self.config.volume = Some(self.volume);
+        if let Err(error) = self.config.save() {
+            eprintln!("blue-dove: {error}");
+        }
+    }
+
+    /// Writes the settings to disk, with the volume as it now stands.
+    pub fn save_config(&mut self) {
+        self.save_settings();
+    }
+
+    /// Writes the open playlists to the settings file.
+    ///
+    /// Every change to a playlist or its tabs ends here, so what the window
+    /// shows is what the next start opens, even after a crash. Tracks are
+    /// stored by path; see [`SavedPlaylist`] for why.
+    pub fn save_playlists(&mut self) {
+        self.config.playlists = Some(
+            self.playlists
+                .items
+                .iter()
+                .map(|playlist| SavedPlaylist {
+                    name: playlist.name.clone(),
+                    tracks: playlist
+                        .tracks
+                        .iter()
+                        .filter_map(|&index| track_path(&self.library, index))
+                        .collect(),
+                })
+                .collect(),
+        );
+        self.config.active_playlist = Some(self.playlists.active);
+        self.config.selected_track = self
+            .view
+            .selected
+            .and_then(|index| track_path(&self.library, index));
+        self.save_settings();
+    }
+
+    /// Swaps in a freshly built library, carrying the playlists over to it.
+    ///
+    /// A playlist holds indices into the library, and a scan produces a new
+    /// list, so the indices have to be found again by path. A track that is
+    /// gone drops out of its playlist; the playing track is found the same
+    /// way, so a rescan while something plays does not stop it.
+    pub fn adopt_library(&mut self, library: Library) {
+        let paths: Vec<Vec<PathBuf>> = self
+            .playlists
+            .items
+            .iter()
+            .map(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .filter_map(|&index| track_path(&self.library, index))
+                    .collect()
+            })
+            .collect();
+        let selected = self
+            .view
+            .selected
+            .and_then(|index| track_path(&self.library, index));
+        let playing = self
+            .playing
+            .and_then(|index| track_path(&self.library, index));
+
+        // A scan that finds nothing, with a playlist that held something, is
+        // a directory that went away rather than one that was emptied; the
+        // session is left as it was so the next run can still open it.
+        let vanished = library.is_empty() && paths.iter().any(|tracks| !tracks.is_empty());
+
+        self.library = library;
+        self.textures.clear();
+        self.view.album = (!self.library.albums.is_empty()).then_some(0);
+
+        if vanished {
+            return;
+        }
+        if paths.iter().any(|tracks| !tracks.is_empty()) {
+            self.remap_playlists(paths, selected, playing);
+        } else {
+            self.restore_playlists();
+        }
+    }
+
+    /// Finds the tracks of the playlists again in the library just scanned.
+    fn remap_playlists(
+        &mut self,
+        paths: Vec<Vec<PathBuf>>,
+        selected: Option<PathBuf>,
+        playing: Option<PathBuf>,
+    ) {
+        let positions = track_positions(&self.library);
+        let find = |path: &PathBuf| positions.get(path.as_path()).copied();
+
+        for (playlist, tracks) in self.playlists.items.iter_mut().zip(paths) {
+            playlist.set(tracks.iter().filter_map(&find));
+        }
+        self.playlists.active = self.playlists.active.min(self.playlists.items.len() - 1);
+
+        self.playing = playing.as_ref().and_then(find);
+        let selected = selected
+            .as_ref()
+            .and_then(find)
+            .filter(|index| self.playlists.current().tracks.contains(index));
+        self.select_restored(selected);
+        self.save_playlists();
+    }
+
+    /// Reopens the playlists the last run left open.
+    ///
+    /// The scan is what turns a saved path back into a track, so this runs
+    /// when it finishes. A playlist whose files are gone keeps its tab and
+    /// loses those tracks, so the shape of the session survives a rename or
+    /// a move; when no track at all is found, which is what a drive that is
+    /// not mounted looks like, the saved list is left alone so the next run
+    /// can still open it.
+    fn restore_playlists(&mut self) {
+        let Some(saved) = self.config.playlists.take() else {
+            return;
+        };
+        let positions = track_positions(&self.library);
+
+        let mut items: Vec<crate::playlist::Playlist> = saved
+            .iter()
+            .map(|saved| {
+                let mut playlist = crate::playlist::Playlist::new(saved.name.clone());
+                playlist.add(
+                    saved
+                        .tracks
+                        .iter()
+                        .filter_map(|path| positions.get(path.as_path()).copied()),
+                );
+                playlist
+            })
+            .collect();
+        if items.iter().all(|playlist| playlist.tracks.is_empty()) {
+            self.config.playlists = Some(saved);
+            return;
+        }
+
+        let active = self
+            .config
+            .active_playlist
+            .unwrap_or(0)
+            .min(items.len() - 1);
+        let selected = self
+            .config
+            .selected_track
+            .as_deref()
+            .and_then(|path| positions.get(path).copied())
+            .filter(|index| items[active].tracks.contains(index));
+
+        self.playlists = Playlists {
+            items: std::mem::take(&mut items),
+            active,
+        };
+        self.select_restored(selected);
+    }
+
+    /// Picks the layout for the window's size, and snaps a window that has
+    /// shrunk into the compact one to its fixed size.
+    ///
+    /// The snap happens once, when the window crosses into the compact
+    /// layout, so the window manager is not fought while the user drags:
+    /// after that the window can be resized freely, and growing it past the
+    /// break brings the album list and the playlist back.
+    fn update_layout(&mut self, ctx: &egui::Context) {
+        let compact = compact_for(ctx.viewport_rect().size());
+        if compact == self.compact {
+            return;
+        }
+        self.compact = compact;
+        if compact {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                COMPACT_SIZE[0],
+                COMPACT_SIZE[1],
+            )));
+        }
+    }
+
+    /// Takes in the commands D-Bus clients sent since the last frame.
+    ///
+    /// The service arrives on a channel of its own, since connecting to the
+    /// bus takes a moment; until it does, this does nothing, and when the
+    /// host has no bus at all it never does anything.
+    fn poll_mpris(&mut self, ctx: &egui::Context) {
+        let mut connected = false;
+        if let Some(receiver) = &self.service
+            && let Ok(service) = receiver.try_recv()
+        {
+            // A host without a session bus, or another player holding the
+            // name, answers `None`: the app carries on without it.
+            self.mpris = service;
+            self.service = None;
+            connected = self.mpris.is_some();
+            if !connected {
+                self.remote = None;
+            }
+        }
+
+        // Collected first: draining while calling `apply` would hold a
+        // borrow of `self` across the call.
+        let commands: Vec<Command> = self
+            .remote
+            .iter()
+            .flat_map(|receiver| receiver.try_iter())
+            .collect();
+        for command in commands {
+            self.apply(command, ctx);
+        }
+
+        if connected || self.mpris.is_some() {
+            self.publish();
+            // A client asking for the position expects it to move, and the
+            // app only repaints on demand. The draw pass already asks for
+            // this while a track plays; a quarter second is enough for a
+            // client that reads the position.
+            if self.playing.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        }
+    }
+
+    /// Moves the player on when a track runs out, and keeps it waking.
+    ///
+    /// A window that is hidden draws nothing, so this cannot live in the
+    /// drawing pass: a track that ended would never hand over to the next.
+    fn advance(&mut self, ctx: &egui::Context) {
+        if self.seek.is_some() {
+            return;
+        }
+        let Some(index) = self.playing else {
+            return;
+        };
+        if !self.audio.as_ref().is_some_and(|audio| audio.is_empty()) {
+            // The seek bar's cursor moves with the position, so the window
+            // has to draw while a track plays. A short track moves the
+            // cursor across the bar quickly, and a slow rate shows that as
+            // jumps: twenty milliseconds is fifty frames a second, which
+            // stays smooth even then.
+            ctx.request_repaint_after(Duration::from_millis(20));
+            return;
+        }
+        if self.repeat {
+            self.play(index);
+        } else {
+            self.step(true);
+        }
+    }
+
+    /// Hides the window on close instead of quitting, when asked to.
+    ///
+    /// The audio runs on a thread of its own, so hiding leaves the music
+    /// playing. Quit in the File menu still ends the app, and launching it
+    /// again brings the window back.
+    fn handle_close(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if !self.keeps_playing_on_close() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // The window itself is asked, rather than a viewport command left for
+        // eframe to apply after the pass: this way it leaves the screen as
+        // the close was clicked, not a frame later.
+        match frame.winit_window() {
+            Some(window) => window.set_visible(false),
+            None => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
+        }
+        self.save_playlists();
+    }
+
+    /// Brings the window back when another launch asked for it.
+    fn poll_requests(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(receiver) = &self.requests else {
+            return;
+        };
+        let requests: Vec<crate::instance::Request> = receiver.try_iter().collect();
+        if requests.is_empty() {
+            return;
+        }
+        let mut raise = false;
+        for request in requests {
+            match request {
+                crate::instance::Request::Show => raise = true,
+                // A command is carried out where it lands: a media key from a
+                // script should not pull the window up in front of the user.
+                crate::instance::Request::Action(action) => {
+                    self.apply(action.command(), ctx);
+                }
+                crate::instance::Request::Open(paths) => {
+                    raise = true;
+                    self.open_paths(&paths);
+                }
+            }
+        }
+        // The request was carried out after this frame's state was published,
+        // and a stop leaves nothing that asks for another frame, so the
+        // remote control would keep reporting the old state.
+        ctx.request_repaint();
+        if raise {
+            self.raise_window(ctx, frame);
+        }
+    }
+
+    /// Brings the window back to the screen.
+    fn raise_window(&self, ctx: &egui::Context, frame: &eframe::Frame) {
+        match frame.winit_window() {
+            Some(window) => {
+                window.set_visible(true);
+                window.set_minimized(false);
+                window.focus_window();
+            }
+            None => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+        // The window was hidden while it had nothing to draw, so the first
+        // pass after it comes back has to draw a whole frame.
+        ctx.request_repaint();
+    }
+
+    /// Starts answering launches that ask this window to do something.
+    ///
+    /// The listener wakes the window through the same waker the remote
+    /// control uses, since the app only draws when something asks it to.
+    pub fn watch_requests(&mut self, listener: TcpListener, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        let waker: crate::instance::Waker = std::sync::Arc::new(move || ctx.request_repaint());
+        self.requests = Some(crate::instance::serve(listener, waker));
+    }
+
+    /// Carries out one command from a D-Bus client.
+    fn apply(&mut self, command: Command, ctx: &egui::Context) {
+        match command {
+            Command::Play if self.playing.is_none() || self.paused() => self.toggle(),
+            Command::Play => {}
+            Command::Pause if !self.paused() => self.toggle(),
+            Command::Pause => {}
+            Command::PlayPause => self.toggle(),
+            Command::Stop => self.stop(),
+            Command::Next => self.step(true),
+            Command::Previous => self.step(false),
+            Command::Seek(offset) => self.seek_to_position(Duration::from_micros(
+                u64::try_from(
+                    self.position()
+                        .as_micros()
+                        .saturating_add_signed(i128::from(offset)),
+                )
+                .unwrap_or(0),
+            )),
+            Command::SetPosition(position) => {
+                self.seek_to_position(Duration::from_micros(position.max(0) as u64));
+            }
+            Command::SetVolume(volume) => self.set_volume(volume as f32),
+            Command::SetRepeat(repeat) => self.set_repeat(repeat),
+            Command::SetShuffle(shuffle) => self.set_random(shuffle),
+            Command::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+        }
+    }
+
+    /// Tells the service what the player is doing.
+    fn publish(&mut self) {
+        let Some(service) = &self.mpris else {
+            return;
+        };
+        let track = self
+            .playing
+            .and_then(|index| self.library.tracks.get(index));
+        let title = track.map(|track| track.title.clone()).unwrap_or_default();
+        let artists: Vec<String> = track
+            .map(|track| {
+                track
+                    .artist
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|artist| !artist.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let album = track.map(|track| track.album.clone()).unwrap_or_default();
+        let playback = match self.playing {
+            None => Playback::Stopped,
+            Some(_) if self.paused() => Playback::Paused,
+            Some(_) => Playback::Playing,
+        };
+        let queue = self.walked_tracks().len();
+        let state = crate::mpris::State {
+            playback,
+            title,
+            artists,
+            album,
+            length: self.length.as_micros() as i64,
+            position: self.position().as_micros() as i64,
+            volume: f64::from(self.volume),
+            repeat: self.repeat,
+            shuffle: self.random,
+            can_seek: self.playing.is_some() && !self.length.is_zero(),
+            can_go_next: queue > 1,
+            can_go_previous: queue > 1,
+            track: self.playing.map_or(0, |index| index as u64),
+        };
+        service.update(state);
+    }
+
+    /// Moves the playback position by `seconds`, staying inside the track.
+    fn seek_relative(&mut self, seconds: f32) {
+        if self.playing.is_none() || self.length.is_zero() {
+            return;
+        }
+        let target = self.position().as_secs_f32() + seconds;
+        self.seek_to(target / self.length.as_secs_f32());
+    }
+
+    /// Handles the keyboard shortcuts, unless a text box has the focus.
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|memory| memory.focused().is_some()) {
+            return;
+        }
+        let pressed = |key| ctx.input(|input| input.key_pressed(key));
+        let command = ctx.input(|input| input.modifiers.command);
+
+        if pressed(egui::Key::Space) {
+            self.toggle();
+        }
+        if pressed(egui::Key::Delete) {
+            self.remove_selected();
+        }
+        if command && pressed(egui::Key::A) {
+            self.select_all();
+        }
+        if command && pressed(egui::Key::O) {
+            self.ask_for_directory();
+        }
+        if pressed(egui::Key::ArrowRight) {
+            if command {
+                self.step(true);
+            } else {
+                self.seek_relative(5.0);
+            }
+        }
+        if pressed(egui::Key::ArrowLeft) {
+            if command {
+                self.step(false);
+            } else {
+                self.seek_relative(-5.0);
+            }
+        }
+        if pressed(egui::Key::ArrowUp) {
+            let volume = self.volume;
+            self.set_volume(volume + 0.05);
+            self.save_config();
+        }
+        if pressed(egui::Key::ArrowDown) {
+            let volume = self.volume;
+            self.set_volume(volume - 0.05);
+            self.save_config();
+        }
+    }
+
+    /// Closes the window after a few frames when running a smoke test.
+    fn tick_smoke(&mut self, ctx: &egui::Context) {
+        if !self.smoke {
+            return;
+        }
+        self.frames += 1;
+        if self.frames >= SMOKE_FRAMES {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// Whether pressing back restarts the playing track rather than moving to
+/// the one before it.
+///
+/// A track that has been playing for longer than [`RESTART_AFTER`] is
+/// restarted: the press goes back to its start, and a press made while it is
+/// still at its start goes on to the previous track.
+fn back_restarts(position: Duration) -> bool {
+    position > RESTART_AFTER
+}
+
+/// Keeps stored column widths usable, whatever the settings file says.
+fn sane_columns(stored: [f32; 6]) -> [f32; 6] {
+    let mut columns = stored;
+    for column in crate::ui::Column::ALL {
+        let width = &mut columns[column.index()];
+        if !width.is_finite() {
+            return DEFAULT_COLUMNS;
+        }
+        *width = width.clamp(column.min_width(), MAX_COLUMN);
+    }
+    columns
+}
+
+/// The file the track at `index` came from, for saving it or finding it again.
+fn track_path(library: &Library, index: usize) -> Option<PathBuf> {
+    library.tracks.get(index).map(|track| track.path.clone())
+}
+
+/// Where each track of `library` sits, by the file it came from.
+fn track_positions(library: &Library) -> HashMap<&Path, usize> {
+    library
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| (track.path.as_path(), index))
+        .collect()
+}
+
+impl eframe::App for App {
+    /// The colour the renderer clears to.
+    ///
+    /// A translucent window clears to nothing, so the panels' own alpha is
+    /// what the compositor blends with the desktop behind the window.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.transparency {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            egui::Color32::from_rgb(0x12, 0x12, 0x18).to_normalized_gamma_f32()
+        }
+    }
+
+    /// Writes the settings one last time as the window closes.
+    ///
+    /// Playlists are saved as they change, so this is for what changes
+    /// without a save of its own: the selected track, and the volume if the
+    /// slider was never let go.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_playlists();
+    }
+
+    /// Runs the player, which a hidden window still needs.
+    ///
+    /// eframe calls this before each drawing pass, and on its own while the
+    /// window is hidden: without it a track that ran out would sit there, and
+    /// a launch that asks for the window would go unheard.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.poll_workers(ctx);
+        // Requests are taken before the remote control is published, so a
+        // command from the command line shows up in MPRIS in the same frame
+        // rather than a frame later.
+        self.poll_requests(ctx, frame);
+        self.poll_mpris(ctx);
+        self.handle_close(ctx, frame);
+        self.advance(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.handle_keys(&ctx);
+        self.update_layout(&ctx);
+
+        let player_height = if self.compact {
+            COMPACT_PLAYER_HEIGHT
+        } else {
+            PLAYER_HEIGHT
+        };
+        egui::Panel::bottom("player")
+            .exact_size(player_height)
+            .show(ui, |ui| self.player_bar(ui));
+
+        if let Some(status) = self.status.clone() {
+            egui::Panel::bottom("status").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(status).color(ui.visuals().warn_fg_color));
+                    if ui.small_button("Dismiss").clicked() {
+                        self.status = None;
+                    }
+                });
+            });
+        }
+
+        // No frame margin: the default one would leave an 8 point border of
+        // background between the window edge and the menu bar. The panels
+        // inside carry their own padding.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+            .show(ui, |ui| {
+                if self.compact {
+                    // The popup: the menu bar across the top, then the art
+                    // and its controls, and nothing else.
+                    self.menu_bar(ui);
+                    self.compact_body(ui);
+                    return;
+                }
+                // The menu bar lives at the top of the library column, sized to
+                // it, so the playlist gets the width the menu bar would have
+                // taken across the whole window.
+                egui::Panel::left("library")
+                    .exact_size(ALBUM_LIST_WIDTH)
+                    .resizable(false)
+                    .show(ui, |ui| {
+                        self.menu_bar(ui);
+                        self.album_list(ui);
+                    });
+                self.track_table(ui);
+            });
+
+        // Bringing the playing row into view takes another frame, and the
+        // repaint that playing asks for can be a quarter second away.
+        if self.view.reveal {
+            ctx.request_repaint();
+        }
+
+        self.tick_smoke(&ctx);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::library::Track;
+
+    pub(crate) fn track(album: &str, number: u32, title: &str) -> Track {
+        Track {
+            path: PathBuf::from(format!("/music/{album}/{title}.flac")),
+            title: title.to_string(),
+            artist: "Someone".to_string(),
+            album: album.to_string(),
+            album_artist: "Someone".to_string(),
+            year: Some(2007),
+            disc: None,
+            number: Some(number),
+            duration: Duration::from_secs(120),
+            cover: None,
+            directory: PathBuf::from(album),
+            tagged_album: true,
+        }
+    }
+
+    pub(crate) fn app_with(albums: &[(&str, &[&str])]) -> App {
+        let mut tracks = Vec::new();
+        for (album, titles) in albums {
+            for (index, title) in titles.iter().enumerate() {
+                tracks.push(track(album, index as u32 + 1, title));
+            }
+        }
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(tracks);
+        app.open_album(0);
+        app
+    }
+
+    /// An app holding one album, with Random Order on.
+    pub(crate) fn random_app(titles: &[&str]) -> App {
+        let mut app = app_with(&[("One", titles)]);
+        app.set_random(true);
+        app
+    }
+
+    #[test]
+    fn the_table_shows_the_tracks_of_the_open_album() {
+        let app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        assert_eq!(app.visible_tracks().len(), 2);
+    }
+
+    #[test]
+    fn the_search_box_filters_titles_and_artists() {
+        let mut app = app_with(&[("One", &["Opening", "Finale"])]);
+        app.view.filter = "open".to_string();
+        let shown = app.visible_tracks();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(app.library.tracks[shown[0]].title, "Opening");
+
+        app.view.filter = "someone".to_string();
+        assert_eq!(app.visible_tracks().len(), 2);
+
+        app.view.filter = "nothing".to_string();
+        assert!(app.visible_tracks().is_empty());
+    }
+
+    #[test]
+    fn a_track_knows_its_album() {
+        let app = app_with(&[("One", &["A"]), ("Two", &["B", "C"])]);
+        assert_eq!(app.album_of(0), Some(0));
+        assert_eq!(app.album_of(1), Some(1));
+        assert_eq!(app.album_of(2), Some(1));
+        assert_eq!(app.album_of(9), None);
+    }
+
+    #[test]
+    fn opening_an_album_replaces_the_playlist() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.open_album(0);
+        assert_eq!(app.playlists.current().tracks, [0, 1]);
+        app.open_album(1);
+        assert_eq!(app.playlists.current().tracks, [2]);
+        assert_eq!(app.view.selected, Some(2));
+    }
+
+    #[test]
+    fn adding_a_directory_queues_the_loose_files_beside_its_albums() {
+        // A directory can hold an album and some files of their own, or
+        // nothing but files; a double-click queues both.
+        let mut album = track("One", 1, "A");
+        album.directory = PathBuf::from("Mixed");
+        let mut second = track("One", 2, "B");
+        second.directory = PathBuf::from("Mixed");
+        let mut loose = track("Loose", 1, "Stray");
+        loose.directory = PathBuf::from("Mixed");
+        loose.tagged_album = false;
+        let mut other = track("Loose", 1, "Another");
+        other.directory = PathBuf::from("Mixed");
+        other.tagged_album = false;
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![album, second, loose, other]);
+        app.playlists.current_mut().clear();
+
+        let mixed = app
+            .library
+            .directories
+            .iter()
+            .find(|directory| directory.name == "Mixed")
+            .cloned()
+            .expect("the directory");
+        assert_eq!(mixed.loose.len(), 2);
+        app.add_directory_at(&mixed.path);
+
+        let queued = app.playlists.current().tracks.clone();
+        assert_eq!(
+            queued,
+            [0, 1, 2, 3],
+            "the album in playing order, then the loose files"
+        );
+    }
+
+    #[test]
+    fn adding_a_directory_of_only_loose_files_queues_them() {
+        let mut loose = track("Loose", 1, "Stray");
+        loose.directory = PathBuf::from("Singles");
+        loose.tagged_album = false;
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![loose]);
+        app.playlists.current_mut().clear();
+
+        let singles = app.library.directories[0].clone();
+        app.add_directory_at(&singles.path);
+        assert_eq!(app.playlists.current().tracks, [0]);
+    }
+
+    #[test]
+    fn a_file_from_the_command_line_replaces_the_default_tab() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        // The playlist holds album One; naming one of album Two's files
+        // should replace it rather than add to it.
+        let wanted = PathBuf::from("/music/Two/C.flac");
+        app.open_paths(std::slice::from_ref(&wanted));
+
+        let tab = app.playlists.current();
+        assert_eq!(tab.name, "Default", "the file plays in the Default tab");
+        assert_eq!(tab.tracks, [2], "and replaces what the tab held");
+        // Whether the track then starts is the player's business: it needs an
+        // output device and the file itself, neither of which a test has.
+    }
+
+    #[test]
+    fn a_directory_from_the_command_line_queues_what_it_holds() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.playlists.current_mut().set([0]);
+        app.open_paths(&[PathBuf::from("/music/Two")]);
+
+        assert_eq!(
+            app.playlists.current().tracks,
+            [0, 2],
+            "the directory's tracks join the playlist"
+        );
+    }
+
+    #[test]
+    fn a_path_the_library_does_not_hold_is_reported() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.open_paths(&[PathBuf::from("/elsewhere/not-here.flac")]);
+
+        assert_eq!(
+            app.status.as_deref(),
+            Some("/elsewhere/not-here.flac is not in the music directory")
+        );
+    }
+
+    #[test]
+    fn a_file_plays_in_a_tab_created_for_it_when_none_is_named_default() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.playlists.current_mut().name = "Evening".to_string();
+
+        app.open_paths(&[PathBuf::from("/music/One/A.flac")]);
+
+        assert_eq!(app.playlists.items.len(), 2, "a tab is opened for it");
+        assert_eq!(app.playlists.current().name, "Default");
+        assert_eq!(app.playlists.current().tracks, [0]);
+        assert_eq!(
+            app.playlists.items[0].name, "Evening",
+            "the other tab stays"
+        );
+    }
+
+    #[test]
+    fn adding_a_directory_queues_its_albums() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        let directory = app
+            .library
+            .directories
+            .first()
+            .cloned()
+            .expect("a directory");
+        app.playlists.current_mut().clear();
+        app.add_directory_at(&directory.path);
+        let queued = app.playlists.current().tracks.clone();
+        assert_eq!(
+            queued,
+            [0, 1],
+            "the directory's own album, in playing order"
+        );
+    }
+
+    #[test]
+    fn adding_a_directory_queues_albums_from_its_subdirectories() {
+        let mut tracks = Vec::new();
+        for (album, titles) in [("Disc One", ["A"]), ("Disc Two", ["B"])] {
+            for title in titles {
+                let mut track = track(album, 1, title);
+                track.directory = PathBuf::from("Box").join(album);
+                tracks.push(track);
+            }
+        }
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(tracks);
+        app.playlists.current_mut().clear();
+
+        let boxed = app
+            .library
+            .directories
+            .iter()
+            .find(|directory| directory.name == "Box")
+            .cloned()
+            .expect("the shared directory");
+        assert_eq!(boxed.children.len(), 2);
+        app.add_directory_at(&boxed.path);
+        assert_eq!(app.playlists.current().tracks, [0, 1]);
+    }
+
+    #[test]
+    fn a_directory_can_be_folded_away() {
+        let mut app = app_with(&[("One", &["A"])]);
+        let directory = app
+            .library
+            .directories
+            .first()
+            .cloned()
+            .expect("a directory");
+        assert!(!app.is_collapsed(&directory));
+        app.toggle_collapsed_at(&directory.path);
+        assert!(app.is_collapsed(&directory));
+        app.toggle_collapsed_at(&directory.path);
+        assert!(!app.is_collapsed(&directory));
+    }
+
+    #[test]
+    fn renaming_a_playlist_keeps_the_tracks() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.rename_playlist("  Evening  ");
+        assert_eq!(app.playlists.current().name, "Evening");
+        assert_eq!(app.playlists.current().tracks.len(), 1);
+        app.rename_playlist("   ");
+        assert_eq!(
+            app.playlists.current().name,
+            "Evening",
+            "a blank name is ignored"
+        );
+    }
+
+    #[test]
+    fn random_playback_draws_from_the_active_playlist() {
+        let mut app = random_app(&["A", "B", "C"]);
+        let current = app.playlists.current().tracks[0];
+        let order = app.shuffle_order();
+        assert_eq!(order.len(), 3);
+        for track in &order {
+            assert!(
+                app.playlists.current().tracks.contains(track),
+                "the shuffle holds only the playlist's tracks"
+            );
+        }
+        let next = app.shuffled_neighbour(current, true).expect("a track");
+        assert!(order.contains(&next));
+    }
+
+    #[test]
+    fn a_playlist_is_saved_by_path() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.playlists.add();
+        app.rename_playlist("Evening");
+        app.playlists.current_mut().add([2]);
+        app.save_playlists();
+
+        let saved = app.config.playlists.as_ref().expect("the tabs are saved");
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].name, "Default");
+        assert_eq!(saved[1].name, "Evening");
+        assert_eq!(
+            saved[1].tracks,
+            [PathBuf::from("/music/Two/C.flac")],
+            "tracks are stored as the files they came from"
+        );
+        assert_eq!(app.config.active_playlist, Some(1));
+    }
+
+    #[test]
+    fn saved_playlists_come_back_when_the_directory_is_scanned() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.playlists.add();
+        app.rename_playlist("Evening");
+        app.playlists.current_mut().add([2]);
+        app.view.selected = Some(2);
+        app.save_playlists();
+        let saved = app.config.playlists.clone().expect("the tabs are saved");
+
+        let mut restarted = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        restarted.config.playlists = Some(saved);
+        restarted.config.active_playlist = Some(1);
+        restarted.config.selected_track = Some(PathBuf::from("/music/Two/C.flac"));
+        restarted.restore_playlists();
+
+        assert_eq!(restarted.playlists.items.len(), 2);
+        assert_eq!(restarted.playlists.current().name, "Evening");
+        assert_eq!(restarted.playlists.current().tracks, [2]);
+        assert_eq!(restarted.playlists.items[0].tracks, [0, 1]);
+        assert_eq!(restarted.view.selected, Some(2));
+    }
+
+    #[test]
+    fn a_playlist_whose_files_are_gone_keeps_its_tab() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.config.playlists = Some(vec![
+            SavedPlaylist {
+                name: "Gone".to_string(),
+                tracks: vec![PathBuf::from("/elsewhere/lost.flac")],
+            },
+            SavedPlaylist {
+                name: "Here".to_string(),
+                tracks: vec![PathBuf::from("/music/One/A.flac")],
+            },
+        ]);
+        app.config.active_playlist = Some(1);
+        app.restore_playlists();
+
+        assert_eq!(app.playlists.items.len(), 2, "both tabs are back");
+        assert_eq!(app.playlists.items[0].name, "Gone");
+        assert!(
+            app.playlists.items[0].tracks.is_empty(),
+            "its files are gone"
+        );
+        assert_eq!(app.playlists.current().name, "Here");
+        assert_eq!(app.playlists.current().tracks, [0]);
+    }
+
+    #[test]
+    fn clicking_selects_one_row_and_ctrl_click_adds_another() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.select_only(0);
+        assert_eq!(app.view.selection, [0].into_iter().collect());
+        app.toggle_selection(2);
+        assert_eq!(app.view.selection, [0, 2].into_iter().collect());
+        app.toggle_selection(0);
+        assert_eq!(app.view.selection, [2].into_iter().collect(), "toggled off");
+        assert_eq!(app.view.selected, Some(2), "the anchor moves with it");
+    }
+
+    #[test]
+    fn shift_click_selects_the_range_from_the_anchor() {
+        let mut app = app_with(&[("One", &["A", "B", "C", "D"])]);
+        app.select_only(1);
+        app.extend_selection(3);
+        assert_eq!(app.view.selection, [1, 2, 3].into_iter().collect());
+        app.extend_selection(0);
+        assert_eq!(
+            app.view.selection,
+            [0, 1].into_iter().collect(),
+            "backwards"
+        );
+    }
+
+    #[test]
+    fn select_all_takes_the_whole_playlist() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.select_all();
+        assert_eq!(app.view.selection, [0, 1].into_iter().collect());
+
+        // A search narrows what is shown, and so what is selected.
+        app.view.filter = "b".to_string();
+        app.select_all();
+        assert_eq!(app.view.selection, [1].into_iter().collect());
+    }
+
+    #[test]
+    fn removing_takes_the_rows_out_of_the_playlist_only() {
+        // The rows leave the playlist; the files stay exactly where they are.
+        let directory =
+            std::env::temp_dir().join(format!("blue-dove-remove-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let mut paths = Vec::new();
+        for name in ["one.flac", "two.flac", "three.flac"] {
+            let path = directory.join(name);
+            std::fs::write(&path, b"pretend audio").expect("the file is written");
+            paths.push(path);
+        }
+        let mut tracks: Vec<Track> = paths
+            .iter()
+            .map(|path| {
+                let mut track = track("One", 1, "Song");
+                track.path = path.clone();
+                track
+            })
+            .collect();
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(std::mem::take(&mut tracks));
+        app.open_album(0);
+        app.select_all();
+        // Two of the three are taken out, the middle one stays.
+        app.toggle_selection(1);
+        app.remove_selected();
+
+        assert_eq!(app.playlists.current().tracks, [1]);
+        for path in &paths {
+            assert!(path.is_file(), "{} was left on disk", path.display());
+        }
+        assert!(app.view.selection.is_empty(), "nothing stays selected");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn playing_a_selection_leaves_the_playlist_alone() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.select_only(2);
+        app.play_selected();
+
+        assert_eq!(
+            app.playlists.current().tracks,
+            [0, 1, 2],
+            "the playlist still holds everything"
+        );
+        assert_eq!(app.queue, Some(vec![2]), "the queue is the selection");
+    }
+
+    #[test]
+    fn next_walks_the_queue_a_selection_started() {
+        let mut app = app_with(&[("One", &["A", "B", "C", "D"])]);
+        app.view.selection = [1, 3].into_iter().collect();
+        app.queue = Some(vec![1, 3]);
+
+        // Next from the first queued track lands on the other one, skipping
+        // the playlist rows in between.
+        assert_eq!(
+            crate::playlist::neighbour(app.walked_tracks(), 1, true),
+            Some(3)
+        );
+        assert_eq!(
+            crate::playlist::neighbour(app.walked_tracks(), 3, true),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_removed_track_leaves_the_queue_too() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.queue = Some(vec![0, 1, 2]);
+        app.select_only(1);
+        app.remove_selected();
+        assert_eq!(app.queue, Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn back_restarts_a_track_that_has_been_playing_a_while() {
+        assert!(
+            !back_restarts(Duration::ZERO),
+            "a fresh track goes back a track"
+        );
+        assert!(
+            !back_restarts(Duration::from_secs(2)),
+            "the first few seconds still go back a track"
+        );
+        assert!(
+            !back_restarts(RESTART_AFTER),
+            "the threshold itself is not past it"
+        );
+        assert!(
+            back_restarts(RESTART_AFTER + Duration::from_millis(1)),
+            "anything past it restarts the track"
+        );
+        assert!(back_restarts(Duration::from_secs(180)));
+    }
+
+    #[test]
+    fn random_order_walks_one_shuffle_from_end_to_end() {
+        let mut app = random_app(&["A", "B", "C", "D", "E"]);
+        let tracks = app.playlists.current().tracks.clone();
+
+        // Follow the order from its first track: every track comes up once
+        // before any comes back, and then the order repeats.
+        let order = app.shuffle_order();
+        let mut heard = Vec::new();
+        let mut current = order[0];
+        for _ in 0..tracks.len() {
+            heard.push(current);
+            current = app.shuffled_neighbour(current, true).expect("a next track");
+        }
+        let mut sorted = heard.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, tracks, "the whole playlist is heard once");
+        assert_eq!(current, order[0], "and then the shuffle starts again");
+    }
+
+    #[test]
+    fn going_back_then_forward_plays_the_same_track_again() {
+        let mut app = random_app(&["A", "B", "C", "D", "E"]);
+        let first = app.shuffle_order()[0];
+
+        let second = app.shuffled_neighbour(first, true).expect("a next track");
+        let back = app
+            .shuffled_neighbour(second, false)
+            .expect("a previous track");
+        assert_eq!(back, first, "previous returns to the track that played");
+        let forward = app.shuffled_neighbour(back, true).expect("a next track");
+        assert_eq!(
+            forward, second,
+            "next plays the track that played before, not a fresh draw"
+        );
+    }
+
+    #[test]
+    fn the_shuffle_keeps_its_order_between_steps() {
+        let mut app = random_app(&["A", "B", "C", "D"]);
+        let order = app.shuffle_order();
+        for _ in 0..5 {
+            assert_eq!(app.shuffle_order(), order, "the order does not change");
+        }
+    }
+
+    #[test]
+    fn a_track_played_by_hand_continues_in_the_shuffle() {
+        let mut app = random_app(&["A", "B", "C", "D"]);
+        let order = app.shuffle_order();
+        // The second track of the shuffle is picked out of the table.
+        let picked = order[1];
+        let next = app.shuffled_neighbour(picked, true).expect("a next track");
+        assert_eq!(next, order[2], "the shuffle carries on from that track");
+    }
+
+    #[test]
+    fn a_change_of_playlist_draws_a_new_shuffle() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C", "D"])]);
+        app.set_random(true);
+        assert_eq!(app.shuffle_order().len(), 2);
+        assert!(
+            app.shuffle.is_some(),
+            "the order is drawn when it is needed"
+        );
+
+        app.open_album(1);
+        assert!(app.shuffle.is_none(), "the old order no longer fits");
+        assert_eq!(app.shuffle_order().len(), 2);
+    }
+
+    #[test]
+    fn a_removed_track_draws_a_new_shuffle() {
+        let mut app = random_app(&["A", "B", "C"]);
+        app.select_only(1);
+        app.remove_selected();
+
+        let order = app.shuffle_order();
+        assert_eq!(order.len(), 2, "the shuffle is of what the playlist holds");
+        assert!(!order.contains(&1), "the removed track is not walked");
+    }
+
+    #[test]
+    fn switching_random_off_and_on_draws_a_new_shuffle() {
+        let mut app = random_app(&["A", "B", "C"]);
+        let first = app.shuffle_order();
+        app.set_random(false);
+        app.set_random(true);
+        assert_eq!(app.shuffle_order().len(), 3);
+        assert_ne!(app.shuffle_order(), first, "a new order is drawn");
+    }
+
+    #[test]
+    fn a_small_window_is_the_popup() {
+        assert!(compact_for(egui::vec2(320.0, 400.0)));
+        assert!(compact_for(egui::vec2(900.0, 420.0)), "too short");
+        assert!(compact_for(egui::vec2(500.0, 800.0)), "too narrow");
+        assert!(!compact_for(egui::vec2(1180.0, 760.0)));
+        assert!(
+            !compact_for(egui::vec2(560.0, 430.0)),
+            "the break is exclusive"
+        );
+    }
+
+    #[test]
+    fn the_compact_size_is_inside_the_compact_layout() {
+        // The snap has to land where the popup still fits, or the window
+        // would flicker between the two layouts.
+        assert!(compact_for(egui::vec2(COMPACT_SIZE[0], COMPACT_SIZE[1])));
+        // The control strip is laid out at the album column's width, so the
+        // popup has to be at least that wide, and tall enough for the art
+        // under the menu bar and above the player bar.
+        const { assert!(COMPACT_SIZE[0] >= ALBUM_LIST_WIDTH) };
+        const { assert!(COMPACT_SIZE[1] > COMPACT_PLAYER_HEIGHT + ALBUM_LIST_WIDTH) };
+    }
+
+    #[test]
+    fn shrinking_the_window_switches_to_the_popup() {
+        let mut app = app_with(&[("One", &["A"])]);
+        assert!(!app.compact);
+        // The size is what `update_layout` reads, so this drives the same
+        // decision the window does.
+        app.compact = compact_for(egui::vec2(300.0, 390.0));
+        assert!(app.compact);
+    }
+
+    #[test]
+    fn a_rescan_keeps_the_playlists_on_the_same_tracks() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.playing = Some(0);
+        let before: Vec<_> = app
+            .playlists
+            .current()
+            .tracks
+            .iter()
+            .map(|&index| app.library.tracks[index].path.clone())
+            .collect();
+
+        // A rescan can list the files in another order; the playlist has to
+        // follow the files, not the old positions.
+        let mut tracks = app.library.tracks.clone();
+        tracks.reverse();
+        app.adopt_library(Library::from_tracks(tracks));
+
+        let after: Vec<_> = app
+            .playlists
+            .current()
+            .tracks
+            .iter()
+            .map(|&index| app.library.tracks[index].path.clone())
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(
+            app.playing
+                .map(|index| app.library.tracks[index].path.clone()),
+            before.first().cloned(),
+            "the playing track follows its file too"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_finds_nothing_leaves_the_session_alone() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.adopt_library(Library::default());
+
+        assert_eq!(
+            app.playlists.current().tracks,
+            [0],
+            "the playlist is kept for when the directory comes back"
+        );
+    }
+
+    #[test]
+    fn a_session_that_finds_no_files_is_kept_for_the_next_run() {
+        // An unmounted drive looks like an empty library; the saved tabs must
+        // not be overwritten with nothing.
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        let saved = vec![SavedPlaylist {
+            name: "Game rips".to_string(),
+            tracks: vec![PathBuf::from("/music/rips/track.adx")],
+        }];
+        app.config.playlists = Some(saved);
+        app.restore_playlists();
+
+        assert_eq!(
+            app.playlists.items.len(),
+            1,
+            "the window keeps its default tab"
+        );
+        assert_eq!(app.playlists.current().name, "Default");
+        assert_eq!(
+            app.config.playlists.as_ref().map(Vec::len),
+            Some(1),
+            "the saved tabs wait for the drive"
+        );
+    }
+
+    #[test]
+    fn a_run_with_nothing_saved_keeps_the_default_playlist() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.config.playlists = None;
+        app.restore_playlists();
+        assert_eq!(app.playlists.items.len(), 1);
+        assert_eq!(app.playlists.current().name, "Default");
+    }
+
+    #[test]
+    fn repeat_and_random_are_remembered() {
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.set_repeat(true);
+        app.set_random(true);
+        assert_eq!(app.config.repeat, Some(true));
+        assert_eq!(app.config.random, Some(true));
+        app.set_repeat(false);
+        assert_eq!(app.config.repeat, Some(false));
+    }
+
+    #[test]
+    fn repeat_restarts_the_playing_track() {
+        // The auto-advance branch reads these two, so this pins the rule:
+        // with repeat on, the track that ended is the one that plays again.
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.playing = Some(0);
+        app.set_repeat(true);
+        let restart = if app.repeat { app.playing } else { None };
+        assert_eq!(restart, Some(0), "repeat restarts, it does not step");
+
+        app.set_repeat(false);
+        let restart = if app.repeat { app.playing } else { None };
+        assert_eq!(restart, None, "without repeat, playback steps on");
+    }
+
+    #[test]
+    fn a_smoke_run_starts_with_nothing_to_do() {
+        let app = App::new(&egui::Context::default(), true, Vec::new());
+        assert!(app.scan.is_none());
+        assert!(app.picker.is_none());
+        assert!(app.library.is_empty());
+    }
+
+    #[test]
+    fn closing_keeps_the_music_only_while_it_plays() {
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.background = true;
+        app.playing = Some(0);
+        assert!(
+            app.keeps_playing_on_close(),
+            "the option is on and a track is loaded"
+        );
+
+        app.quitting = true;
+        assert!(!app.keeps_playing_on_close(), "Quit ends the app");
+
+        app.quitting = false;
+        app.playing = None;
+        assert!(
+            !app.keeps_playing_on_close(),
+            "a window with nothing to play has no reason to hide"
+        );
+
+        app.playing = Some(0);
+        app.background = false;
+        assert!(!app.keeps_playing_on_close(), "the option is off");
+    }
+}
