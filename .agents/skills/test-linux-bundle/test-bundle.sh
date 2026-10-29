@@ -93,6 +93,15 @@ apt_xvfb='export DEBIAN_FRONTEND=noninteractive; apt-get update -qq &&
     apt-get install -y -qq --no-install-recommends xvfb xauth \
     libgl1 libglx-mesa0 libegl1 libgl1-mesa-dri'
 
+# The Arch mirrors drop transactions under load, so retry the sync.
+# shellcheck disable=SC2016 # the container expands $p, not this shell
+arch_xvfb='p=0
+until pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xauth mesa; do
+    p=$((p + 1))
+    [ "$p" -lt 3 ] || exit 1
+    sleep 10
+done'
+
 echo "testing $name"
 
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
@@ -108,8 +117,7 @@ fi
 
 container no-gl docker.io/library/debian:stable-slim ''
 if [ "$(uname -m)" = x86_64 ]; then
-    container arch docker.io/library/archlinux:latest \
-        'pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xauth mesa'
+    container arch docker.io/library/archlinux:latest "$arch_xvfb"
 else
     skip arch "the archlinux image is x86_64 only"
 fi
