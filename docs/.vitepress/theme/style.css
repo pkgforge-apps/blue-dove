@@ -1,0 +1,97 @@
+/*
+ * The app's look. Retune the --app-* tokens to the app icon's palette;
+ * everything else derives from them.
+ */
+
+:root {
+  --app-accent: #c07a1e;
+  --app-accent-strong: #a26414;
+  --app-accent-2: #6d3bd6;
+  --app-gradient: linear-gradient(120deg, var(--app-accent-2) 0%, var(--app-accent) 100%);
+  --app-glow: rgba(192, 122, 30, 0.3);
+  --app-tint: rgba(192, 122, 30, 0.08);
+  --app-radius: 16px;
+
+  --vp-font-family-base: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, SFMono-Regular,
+    Menlo, monospace;
+
+  --vp-c-bg: #fdfbf8;
+  --vp-c-bg-alt: #f7f3ed;
+  --vp-c-bg-soft: #f5f1ea;
+  --vp-c-divider: #e8e1d6;
+
+  --vp-c-brand-1: var(--app-accent);
+  --vp-c-brand-2: var(--app-accent-strong);
+  --vp-c-brand-3: var(--app-accent);
+  --vp-c-brand-soft: rgba(192, 122, 30, 0.14);
+
+  --vp-button-brand-bg: var(--app-accent);
+  --vp-button-brand-hover-bg: var(--app-accent-strong);
+
+  --vp-code-block-bg: #1a1424;
+  --vp-code-line-highlight-color: rgba(192, 122, 30, 0.2);
+
+  --vp-nav-bg-color: rgba(253, 251, 248, 0.8);
+  --vp-sidebar-bg-color: var(--vp-c-bg-alt);
+}
+
+.dark {
+  --app-accent: #f2a33c;
+  --app-accent-strong: #ffbf6b;
+  --app-accent-2: #a483ff;
+  --app-glow: rgba(242, 163, 60, 0.28);
+  --app-tint: rgba(242, 163, 60, 0.07);
+
+  --vp-c-bg: #121218;
+  --vp-c-bg-alt: #0e0e13;
+  --vp-c-bg-soft: #1a1a22;
+  --vp-c-bg-elv: #1d1d26;
+  --vp-c-divider: #2a2a36;
+
+  --vp-c-brand-soft: rgba(242, 163, 60, 0.16);
+
+  --vp-code-block-bg: #0b0b10;
+
+  --vp-nav-bg-color: rgba(18, 18, 24, 0.8);
+}
+
+body {
+  background:
+    radial-gradient(1200px 520px at 15% -10%, var(--app-tint), transparent 70%),
+    radial-gradient(900px 480px at 95% 0%, rgba(109, 59, 214, 0.08), transparent 70%),
+    var(--vp-c-bg);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: var(--vp-c-brand-soft);
+}
+
+.VPNavBar .content-body,
+.VPNavBar.has-sidebar .content {
+  backdrop-filter: blur(12px);
+}
+
+.VPNavBarTitle .title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.vp-doc h1 {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.vp-doc h2 {
+  border-top: none;
+  letter-spacing: -0.02em;
+}
+
+.vp-doc a {
+  text-underline-offset: 3px;
+}
+
+.vp-doc div[class*='language-'] {
+  border-radius: 12px;
+}

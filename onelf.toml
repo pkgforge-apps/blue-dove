@@ -1,0 +1,52 @@
+# onelf recipe for the portable Linux bundle. scripts/package-onelf.sh
+# copies it into the AppDir and writes the release version over the
+# placeholder below.
+[package]
+name = "blue-dove"
+command = "bin/blue-dove"
+output = "blue-dove.onelf"
+version = "0.0.0"
+description = "A fast music player with an album browser and waveform seekbar"
+license = "MIT"
+homepage = "https://github.com/pkgforge-apps/blue-dove"
+
+[compression]
+level = 22
+payload = "stipple"
+
+[bundle]
+strip = true
+scan-dlopen = true
+# Mesa from the build host, so the app draws on hosts with no usable GL:
+# musl distributions, minimal VMs and containers. NVIDIA's driver still
+# comes from the host when it is installed.
+gl = true
+dri = true
+# winit draws its own Wayland decorations and never loads libdecor, whose
+# GTK plugin would otherwise pull GTK, cairo and pango into the bundle.
+no-gtk = true
+exclude = ["libdecor"]
+# winit and xkbcommon-dl load the X11 stack by name at runtime, so the
+# string scan cannot see it. libasound is what cpal links; the ALSA
+# plugins behind it load the audio servers, which are bundled here so the
+# app can play without a usable host audio stack of its own.
+include = [
+  "libX11.so.6",
+  "libX11-xcb.so.1",
+  "libXcursor.so.1",
+  "libXi.so.6",
+  "libXrandr.so.2",
+  "libxkbcommon-x11.so.0",
+  "libasound.so.2",
+  "libpulse.so.0",
+  "libpipewire-0.3.so.0",
+  "libasound_module_pcm_pulse.so",
+  "libasound_module_pcm_pipewire.so",
+  "libasound_module_pcm_upmix.so",
+  "libasound_module_pcm_vdownmix.so",
+  "libasound_module_rate_samplerate.so",
+]
+# The ALSA plugins live outside the library directories ldconfig knows, so
+# they need a search path of their own to be found by name.
+search-paths = ["/usr/lib/alsa-lib"]
+

@@ -1,0 +1,352 @@
+# Using Blue Dove
+
+## Open a directory
+
+Pick **File > Open Music Directory**, or press `Ctrl+O`. The browser that
+opens walks your file system and needs nothing installed besides Blue Dove
+itself.
+
+Blue Dove scans the directory and everything under it, reads the tags of every
+audio file it finds, and groups them into albums by album artist, album
+and year. Directories it cannot read are skipped; a file whose tags cannot
+be read is still listed under its file name.
+
+Files and directories whose name starts with a dot are left out, which is
+what **View > Ignore hidden files** is for. It is on to begin with; turn
+it off to list a music directory that keeps its files in a dotted
+directory. Either way the directory you picked is scanned, even if its own
+name starts with a dot. Changing the setting scans again.
+
+The directory is remembered, so the next start scans it again and shows the
+library at once.
+
+## Find an album
+
+The menu bar and the library share the left-hand column: the menus sit
+at its top, and below them your music directory as a tree of directories,
+with the albums inside them. Click the arrow beside a directory to fold
+it away.
+
+A directory that holds a single album is not shown as a row of its own:
+the album stands where the directory would, so a release is never buried
+under a directory named after it. A directory holding several albums keeps
+its row, with those albums listed beneath it. Files that carry no album
+tag appear as small rows under their directory.
+
+Click an album to select it. Double-click one to make it the playlist.
+Double-click a directory to append everything it holds: its albums in
+playing order, the loose files beside them, and then whatever its
+subdirectories hold. A directory of loose files alone queues those.
+
+Cover art comes from the file's tags when it has any, and otherwise from
+an image beside the tracks: `cover.jpg`, `front.png`, `folder.jpg` and
+the other usual names first, then any image whose name starts with
+`cover`, `front`, `folder` or `album`. A `covers`, `artwork` or `scans`
+directory is looked in too, and a disc directory of a multi-disc rip takes the
+art from the directory above it. Tracks without any of that show an empty
+square.
+
+## Starting up
+
+The library is read once and then kept in the cache directory, under
+`blue-dove`. A start shows the albums, the covers and the playlists at
+once, and a scan of the directory runs behind it: files whose size or
+modification time changed are read again, and everything else comes
+from the cache. On a library of seven thousand tracks the first start
+takes about six seconds and later ones a fraction of a second.
+
+Deleting the cache directory is always safe; the next start scans the
+directory as if it were new.
+
+## Playlists
+
+The tabs above the track table are playlists. There is always at least
+one, named "Default" until you rename it: double-click a tab to type a
+new name, and press Enter. The `+` opens another, and the `x` closes one;
+the last one stays.
+
+Double-clicking an album replaces the tracks of the active playlist with
+that album. Double-clicking a directory adds every album in it and in
+its subdirectories, without disturbing what the playlist already holds.
+Double-clicking a loose file plays it on its own.
+
+The tabs, their names, their tracks and the one you were last on are all
+kept: the next start opens the same session. Tracks are remembered by
+file, so a playlist whose files moved comes back with the ones it can
+still find, and a directory that is not mounted leaves the saved tabs
+alone until it is back.
+
+A playlist that holds more than one album is drawn as a list of albums:
+wherever a run of an album's tracks starts, a heading names the album,
+with its cover, its artist and its year, and a rule running to the right
+edge. A playlist that goes back to an earlier album heads it again, so
+the heading always says which album the tracks under it belong to. Loose
+files belong to no album and get no heading.
+
+## Play
+
+Double-click a track, or select one and press the play button. Playback
+continues with the next track of the album when one ends, and wraps
+around at the end.
+
+The transport has four buttons: previous, play or pause, next, and stop.
+They sit on a strip below the album art, with the repeat and random
+buttons on either end, and the volume slider filling what is left of the
+strip. Stop clears the now-playing bar and rewinds, leaving the track
+selected, so play starts it again from the beginning.
+
+Previous restarts the playing track once it has been playing for three
+seconds, and a press while it is still at its start goes to the track
+before it. So a press in the middle of a track starts it over, and a
+second press moves on.
+
+The Length column shows the length of every track. The playing row adds
+its position after the track's name, as `- 0:21/2:14`, so the row you are
+listening to says where in the track the player is. The name is the title
+column, or the file name column when titles are turned off, so the
+position is there either way. Every column of the playing row is written
+in the accent colour, which is what makes it stand out from the rest.
+
+The album art of the playing track fills the top of the library panel on
+the left, with the transport, the playback modes and the volume on a
+strip below it.
+
+Art that is not square cannot both fill that space and be shown whole, so
+a right click on it chooses: **Fill the space** crops the picture to a
+square, and **Fit the whole image** shows all of it, with the space it
+does not fill left as background. The choice is remembered.
+
+The bar at the bottom holds the waveform of the whole track, spanning
+the width of the window. The part already played is drawn in amber.
+Click anywhere in it to jump there, or drag along it to scrub.
+
+The waveform is worked out once and kept in the cache directory, so a
+track played before draws its bar at once. The first time a track plays,
+working it out takes a moment; until it is ready the bar says so, and the
+track plays normally.
+
+## Formats
+
+The player decodes everything in the crate itself, with pure Rust
+decoders, so nothing has to be installed. FLAC, MP3, M4A and ALAC,
+AAC, Ogg Vorbis, Opus, WAV, AIFF, CAF, Matroska audio, MP1 and MP2 go
+through symphonia. Monkey's Audio, WavPack, TTA, Musepack and Shorten
+have decoders of their own, and so do the formats video game rips use:
+Sony VAG, CRI ADX, and Nintendo DSP, BRSTM, BCSTM and BFSTM. They all
+get a waveform like every other track.
+
+Opus is decoded as it plays rather than read into memory first, so even
+a long track starts at once.
+
+A game rip carries no tags, so it is listed under its file name, and its
+length shows as `--:--` until it plays.
+
+Album art is read from the tags, or from an image beside the tracks as
+described under the album list.
+
+Titles written in Japanese, Chinese or Korean are drawn with a system
+font that carries those glyphs, found among the installed fonts at
+startup. Without one, those titles show as boxes: install a CJK font,
+such as `noto-fonts-cjk` on Arch or `fonts-noto-cjk` on Debian and
+Ubuntu, and they draw.
+
+DSD and TAK are not supported: DSD needs a decoding path of its own,
+and the only Rust TAK decoder is GPL-3.0, which would lock the project
+into that licence. The chiptune formats, which play a console's sound
+chips rather than samples, are left out too: SPC, NSF, GBS, VGM and the
+PlayStation sound formats would each need a whole console emulated.
+
+## The command line
+
+`blue-dove --help` lists the flags. Two things are worth knowing beyond the
+list:
+
+`blue-dove /path/to/song.flac` plays that file in a tab named **Default**,
+replacing whatever that tab held. A file the music directory does not
+contain is reported in the status line rather than played. If no music
+directory is set yet, the file's own directory becomes it, so a first run
+can be started from a file.
+
+`blue-dove /path/to/directory` appends every track under that directory to
+the playlist that is showing, the way a double click on the album list
+does.
+
+`--play`, `--pause`, `--play-pause`, `--stop`, `--next` and `--previous`
+go to the player that is already running, so they work from a script, a
+keybinding or a shell prompt. They start nothing: with no player running
+they say so and exit 1. Only one may be given at a time.
+
+## Remote control
+
+The player answers MPRIS, the interface a desktop's media keys and tools
+such as `playerctl` use, over the session bus. `playerctl status`,
+`playerctl play-pause`, `playerctl next`, `playerctl metadata` and the
+rest work as they do with any other player, as do the media keys a
+desktop maps to them.
+
+The bus is optional: on a host without a session bus, or when another
+player already holds the name, the app starts and runs exactly as it does
+with one, and only the remote control is missing.
+
+## Playing in the background
+
+File > Keep Playing When Closed leaves the music playing when the window
+is closed, so the player can sit out of sight while it plays. Launching
+the app again brings that window back rather than starting a second
+player, which also means the desktop's launcher and a second click on the
+binary both land on the window that is already running.
+
+File > Quit still ends the app, whether or not that option is on. With
+nothing playing, closing the window ends it too: a window that would only
+sit hidden has no reason to stay.
+
+The running window is found through a lock file and a loopback socket
+rather than the session bus, so this works on a host that has no bus. The
+lock is released when the process ends, so a window that crashed does not
+leave the app taken.
+
+## The compact window
+
+Shrink the window past a certain size, about 560 by 430 points, and it
+drops the album list and the playlist: what is left is the menu bar, the
+album art, the controls and a thin waveform. That is small enough to sit
+in a corner as a popup while you work. Growing it again brings the rest
+back.
+
+The window snaps to its compact size the moment it crosses that line, so
+the popup always opens at a size that fits it, and it can be resized
+freely from there. The size it was before the snap is not restored, so
+drag the window larger to get the album list back.
+
+## Selecting tracks
+
+Click a row to select it. Ctrl-click adds or removes a row, and
+shift-click selects everything between the last clicked row and the one
+you click. Ctrl+A selects every row the table shows, which a search
+narrows along with the table.
+
+Right-click a row for its menu: **Play** starts the selected tracks and
+nothing else, in playlist order, without changing the playlist; Next and
+Previous then walk those tracks until you play something else.
+**Remove from Playlist** takes the selected rows out of the tab, and so
+does the Delete key. **Select All** is there too.
+
+Removing a track only edits the playlist. No file is ever deleted,
+moved or rewritten: a removed track is still on disk, and opening its
+album again puts it back in the list.
+
+## Columns
+
+The track table has six columns: number, title, file name, artist, album
+and length. The column titles sit in a strip of their own above the rows
+and stay there while the playlist scrolls, so a column can always be
+resized.
+
+Drag the border between two columns to give one more room and the other
+less; the pointer turns into a resize arrow while it is over a border.
+The widths are remembered between runs.
+
+Right-click the column titles for the column menu. Every column can be
+turned off, number included, and the table gives its room to the ones
+left. The file name column is off to begin with: it shows each file's
+own name, which is what a rip whose tags are wrong or missing needs, and
+it sits beside the title column rather than replacing it, so a table can
+show one, the other, or both. **Reset Column Widths** puts the widths
+back as they started.
+
+The columns shrink together when the window is made narrower, so
+everything keeps fitting. Only once they reach their smallest width
+does the table scroll sideways, and the rows scroll under the titles,
+which stay put.
+
+When the window is made wider, the room goes to the columns that hold
+text: the number and length columns keep the width they were given,
+since a wider one would only put empty space beside a few digits.
+
+## Playback modes
+
+**Playback > Repeat Track**, or the leftmost button on the control strip,
+restarts the playing track when it ends instead of moving on.
+**Playback > Random Order**, or the rightmost button, shuffles the
+playlist once and plays it in that order, rather than picking a track at
+every step: every track is heard once before any comes back. A mode that
+is on has its button drawn in amber; a mode that is off has an outline
+only. Both are remembered between runs.
+
+The shuffle is drawn when Random Order is turned on and follows the
+playlist from then on, so Previous and Next walk the same order in
+opposite directions: go back a track and forward again and the same track
+plays both times. Changing the playlist, or a selection becoming the
+queue, draws a new shuffle. A track you start by hand carries on in the
+shuffle from where it sits in it.
+
+Selecting a track or pressing Next, Previous or Stop leaves the table
+showing the playing track, so the highlighted row is always what you
+hear.
+
+## Volume
+
+The volume slider sits at the right-hand end of the control strip, below
+the album art. Drag it, or roll the wheel over it: each notch moves it by
+a twentieth, and the setting is written to the settings file when you let
+go. `Up` and `Down` do the same from the keyboard.
+
+## Keyboard
+
+| Key | Does |
+|-----|------|
+| `Space` | Play or pause |
+| `Left` / `Right` | Seek five seconds back or forward |
+| `Ctrl+Left` / `Ctrl+Right` | Previous or next track |
+| `Up` / `Down` | Raise or lower the volume |
+| `Ctrl+O` | Open a music directory |
+
+Shortcuts are ignored while the search box has the keyboard focus.
+
+## Themes
+
+**View > Theme** offers five palettes:
+
+| Theme | Follows |
+|-------|---------|
+| Default | the app's own blue-black and amber |
+| Adwaita Light | GNOME's light theme |
+| Adwaita Dark | GNOME's dark theme |
+| Breeze Light | KDE Plasma's light theme |
+| Breeze Dark | KDE Plasma's dark theme |
+
+The choice is remembered between runs. It is independent of the system
+theme: the window always draws the palette picked here.
+
+## A translucent window
+
+**View > Translucent background** lets the desktop show through the
+window, the way a terminal emulator with its opacity turned down does.
+It is on by default and kept in the settings file.
+
+The blend is the compositor's work, so the effect needs one running:
+picom, fastcompmgr, or whatever your desktop uses. Without a compositor
+the window is drawn opaque, and nothing is lost. Turn the option off if
+you would rather have a solid window on a busy wallpaper.
+
+## Where settings live
+
+The music directory, the volume, the theme, the two playback modes, the
+column widths and which columns are shown, the open playlists and their
+tabs, and the window options (translucent, keep playing when closed,
+ignore hidden files, fit or fill the album art) are kept in `config.toml`
+under the platform's config directory:
+
+| Platform | File |
+|----------|------|
+| Linux | `~/.config/blue-dove/config.toml` |
+| macOS | `~/Library/Application Support/blue-dove/config.toml` |
+| Windows | `%APPDATA%\blue-dove\config.toml` |
+
+Deleting the file resets all of it, and Blue Dove asks for a directory
+again on the next start.
+
+The library cache and the waveforms are separate, and live under the
+platform's cache directory: `library-<hash>.toml` holds the tags, `covers/`
+the decoded album art and `waveforms/` the peak envelopes. Deleting that
+directory is safe at any time; the next start reads the files again.
