@@ -5,6 +5,10 @@ git_only = true
 changelog_update = true
 dependencies_update = false
 git_release_enable = true
+# The organization makes published releases immutable, so the release stays a
+# draft until release.yml has attached every asset and publishes it. Without
+# this, release-plz publishes at once and the assets can never be added.
+git_release_draft = true
 git_tag_name = "{{ version }}"
 pr_labels = ["release"]
 semver_check = false
