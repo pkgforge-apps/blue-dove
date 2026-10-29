@@ -2,7 +2,7 @@
 # Packs the native release build into an Anylinux AppImage in dist/.
 #
 # Usage: scripts/package-appimage.sh <platform> <version>
-#   scripts/package-appimage.sh x86_64-linux 0.1.0
+#   scripts/package-appimage.sh anylinux-x86_64 0.1.0
 #
 # Produces dist/<app>-<platform>.AppImage and, when GITHUB_REPOSITORY is
 # set, the .zsync its self-updater reads. Runs as root on Arch with the
@@ -12,6 +12,21 @@
 # from the build host.
 set -eu
 cd "$(dirname "$0")/.."
+
+# Detection cannot see a stack the app reaches by name rather than by
+# linking, such as the audio servers behind libasound. An app that needs
+# one names the variables in packaging/appimage/deploy.env. It is sourced
+# before this script sets its own variables, so the script's values win
+# over anything the file happens to set, and with `set -a` in force, so
+# quick-sharun, a child process, receives them. The packages quick-sharun
+# then bundles come from .github/pacman-packages.txt.
+deploy_env=packaging/appimage/deploy.env
+if [ -f "$deploy_env" ]; then
+    set -a
+    # shellcheck disable=SC1090 # the app supplies this file
+    . "$deploy_env"
+    set +a
+fi
 
 platform=$1
 version=$2

@@ -2,9 +2,10 @@
 # Regenerates every raster icon from assets/icon.svg, or from assets/icon.png
 # when the app's icon is pixel art.
 #
-# A PNG source is scaled with nearest-neighbour, so a pixel of the art stays a
-# square block at every size. An SVG source is rendered at each size instead,
-# which is what a vector icon wants.
+# A PNG source is scaled with nearest-neighbour, so no new colors appear; a
+# pixel of the art stays a square block at every size that is a whole
+# multiple of the art's grid, and comes out uneven at any other. An SVG
+# source is rendered at each size instead, which is what a vector icon wants.
 #
 # Outputs:
 #   assets/icons/<size>.png           window icon, hicolor theme, icns sources
@@ -24,14 +25,22 @@ if [ -f assets/icon.png ]; then
     else
         magick=convert
     fi
+    # -resize keeps the aspect ratio, so a non-square source would make
+    # non-square icons without complaint.
+    dims=$("$magick" "$source_png" -format '%w %h' info:)
+    if [ "${dims% *}" != "${dims#* }" ]; then
+        echo "assets/icon.png is ${dims% *}x${dims#* }; a pixel-art icon must be square" >&2
+        exit 1
+    fi
 else
     source_png=
 fi
 svg=assets/icon.svg
 
-# The source as an SVG, which is what resvg is given for the favicon and the
-# touch icon. A pixel-art source is wrapped in one that carries the raster,
-# kept outside the repository so a failed run leaves nothing behind.
+# The source as an SVG, which is what resvg is given for the touch icon and
+# what the docs use as favicon and logo. A pixel-art source is wrapped in
+# one that carries the raster and asks browsers not to smooth it, kept
+# outside the repository so a failed run leaves nothing behind.
 wrapped=$(mktemp)
 trap 'rm -f "$wrapped"' EXIT
 if [ -n "$source_png" ]; then
@@ -40,8 +49,9 @@ if [ -n "$source_png" ]; then
         printf 'xmlns:xlink="http://www.w3.org/1999/xlink" '
         printf 'viewBox="0 0 1024 1024" width="1024" height="1024">\n'
         printf '  <image width="1024" height="1024" '
+        printf 'style="image-rendering:pixelated" '
         printf 'xlink:href="data:image/png;base64,'
-        base64 -w 0 "$source_png"
+        base64 < "$source_png" | tr -d '\n'
         printf '"/>\n</svg>\n'
     } > "$wrapped"
     svg=$wrapped

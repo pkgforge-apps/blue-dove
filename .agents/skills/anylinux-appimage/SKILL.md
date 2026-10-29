@@ -54,6 +54,30 @@ information points at `*anylinux-<arch>.AppImage.zsync` on the latest
 release, and the self-updater hook reads it. An image published
 without it silently stops updating.
 
+### When the app has to build its own
+
+An app whose image needs a package or a `DEPLOY_*` variable the shared
+job does not provide ships its own `.github/workflows/appimage.yml`
+instead, and leaves `appimage = false`. The shared `app-release-plz.yml`
+starts it with the tag whenever that file exists, beside the
+`release.yml` it already starts.
+
+That dispatch is the only thing that can start it. release-plz runs on
+`GITHUB_TOKEN`, and GitHub starts no workflow for an event that token
+produced, so neither the release being published nor the asset build
+finishing can trigger anything: `on: release` and `on: workflow_run`
+both stay silent, which is a release that publishes with no image and no
+error anywhere. `workflow_dispatch` is the exception the rule names, so
+the appimage workflow must be startable that way, with a `tag` input.
+
+Keep the image's upload working whether the release is still a draft or
+already published: the two workflows run side by side and the slower one
+finishes after the release went out.
+
+The app's own `appimage.yml` is not a synced file, so it can carry
+whatever that app needs. It still uploads `*anylinux-<arch>.AppImage`
+and its `.zsync`, since the name and the updater do not change.
+
 ## How it is built
 
 `scripts/package-appimage.sh <platform> <version>` installs the release binary to
@@ -76,6 +100,37 @@ binaries into the AppDir by hand.
   has no `libEGL.so.1` or `dri/`. Set another `DEPLOY_*` variable only
   when detection gets that one wrong, and say why in the app's own
   section of `AGENTS.md`.
+- **A stack reached by name.** quick-sharun only detects a deploy mode
+  from what the binary links, so a stack it loads through another
+  library stays out: an audio app reaches the sound server through an
+  ALSA plugin, and nothing links `libpulse`, so `DEPLOY_PULSE` never
+  turns on by itself and the image plays no sound. Such an app names the
+  variables it needs in `packaging/appimage/deploy.env`, a shell
+  fragment:
+
+  ```sh
+  # cpal reaches the server through an ALSA plugin, not by linking it.
+  DEPLOY_PULSE=1
+  ```
+
+  Deploy only what the image's default PCM resolves to. The shared job
+  installs PulseAudio, not PipeWire, and where both are present the
+  pulse config sorts later, so pulse is the default PCM either way. The
+  pulse plugin serves a PulseAudio host and a PipeWire one running
+  pipewire-pulse, which is the usual desktop setup. An app that also
+  installs the PipeWire packages and asks for `DEPLOY_PIPEWIRE` ships
+  its client library and SPA plugins that no config selects.
+
+  `scripts/package-appimage.sh` sources the file before it runs
+  quick-sharun and before it sets its own variables, so a value the file
+  sets that the script also uses is overwritten rather than obeyed. It
+  sources with `set -a`, so a plain assignment in the file is exported
+  and reaches quick-sharun, a child process; a file of bare `NAME=value`
+  lines is enough. `DEPLOY_OPENGL` stays the script's own. An app
+  without the file builds exactly as before. The packages the
+  deployment then bundles, such as the server itself, belong in
+  `.github/pacman-packages.txt`, since quick-sharun copies only what the
+  build host has.
 - **Pins.** The job fetches quick-sharun and `get-debloated-pkgs` from
   one Anylinux-AppImages commit; quick-sharun pins sharun and
   appimagetool itself. To bump, change the commit in the three URLs in
@@ -97,7 +152,7 @@ podman run --rm --security-opt label=disable -v "$PWD:/src" -w /src \
     get-debloated-pkgs --add-common --prefer-nano
     rustup default stable
     cargo build --release --locked
-    sh scripts/package-appimage.sh "$(uname -m)-linux" 0.0.0
+    sh scripts/package-appimage.sh "anylinux-$(uname -m)" 0.0.0
     xvfb-run -a timeout 60 dist/*.AppImage --smoke'
 ```
 

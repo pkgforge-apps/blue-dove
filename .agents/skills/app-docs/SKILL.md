@@ -27,7 +27,8 @@ own palette, type and home page.
 
 ## Personalize
 
-1. **Palette.** Take the two gradient stops from `assets/icon.svg` and
+1. **Palette.** Take the two gradient stops from `assets/icon.svg`, or
+   two dominant colors of `assets/icon.png` for a pixel-art icon, and
    set `--app-accent`, `--app-accent-2`, `--app-accent-strong` (a darker
    accent for hover), `--app-glow` and `--app-tint` (the accent at low
    alpha) in `style.css`, for both `:root` and `.dark`. Tint the
