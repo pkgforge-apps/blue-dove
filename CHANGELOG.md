@@ -1,4 +1,10 @@
 
+## [0.1.8](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.7...v0.1.8) - 2026-10-30
+
+### Features
+
+- *(packaging)* Offer the player for every format it reads ([#20](https://github.com/pkgforge-apps/blue-dove/pull/20)) - ([2363ab9](https://github.com/pkgforge-apps/blue-dove/commit/2363ab934d15d9aadaa6afb8062a1508f340cce8))
+
 ## [0.1.7](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.6...v0.1.7) - 2026-10-30
 
 ### Bug Fixes
