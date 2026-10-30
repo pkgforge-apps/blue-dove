@@ -2,8 +2,8 @@
 //!
 //! rodio decodes through symphonia, which covers the common formats. The ones
 //! it cannot open get a pure Rust decoder of their own here: Monkey's Audio,
-//! WavPack, TTA, Musepack and Shorten. Those decode whole into memory, which
-//! keeps seeking an index into a buffer and takes all I/O off the audio
+//! WavPack, TTA, Musepack, Shorten and AMR. Those decode whole into memory,
+//! which keeps seeking an index into a buffer and takes all I/O off the audio
 //! thread; a track is a few megabytes of PCM at most.
 
 use std::fs::File;
@@ -11,6 +11,9 @@ use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
 
+use codec_core::codecs::amr::mode::AmrFrameType;
+use codec_core::codecs::amr::{AmrCodec, AmrVariant};
+use codec_core::types::{CodecConfig, CodecType, CodedFrame, FrameKind, VariableRateCodec};
 use rodio::source::{SeekError, Source};
 use rodio::{ChannelCount, Decoder, SampleRate};
 
@@ -36,6 +39,7 @@ pub fn open(path: &Path) -> Result<Box<dyn Source + Send>, String> {
         "tta" => Ok(Box::new(Pcm::tta(path)?)),
         "mpc" | "mpp" | "mp+" => Ok(Box::new(Pcm::musepack(path)?)),
         "shn" => Ok(Box::new(Pcm::shorten(path)?)),
+        "amr" => Ok(Box::new(Pcm::amr(path)?)),
         _ => {
             // The game formats a rip is stored in have their own decoders.
             if let Some(decoded) = crate::game::open(path, &extension) {
@@ -181,6 +185,55 @@ impl Pcm {
             }
         }
         Self::wrap(samples, channels as u32, rate, path)
+    }
+
+    /// Decodes an AMR file, in either the narrowband or the wideband variant.
+    ///
+    /// The magic number says which variant the file holds, and that fixes the
+    /// rate and the frame length. Only a speech frame has a mode of its own;
+    /// a comfort-noise, no-data or lost frame is handed over with the mode the
+    /// stream last used, since an AMR frame carries none of its own.
+    fn amr(path: &Path) -> Result<Self, String> {
+        let data = std::fs::read(path).at(path)?;
+        let mut reader = codec_core::codecs::amr::storage::AmrStorageReader::new(&data)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let variant = reader.variant();
+        let kind = match variant {
+            AmrVariant::NarrowBand => CodecType::AmrNb,
+            AmrVariant::WideBand => CodecType::AmrWb,
+        };
+        let mut codec = AmrCodec::new(&CodecConfig::new(kind))
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+
+        let mut samples = Vec::new();
+        let mut mode = 0;
+        while let Some(frame) = reader
+            .next_frame()
+            .map_err(|error| format!("{}: {error}", path.display()))?
+        {
+            let (kind, mode_here) = match frame.frame_type {
+                AmrFrameType::Speech(own) => (FrameKind::Speech, own.index()),
+                AmrFrameType::Sid(_) => (FrameKind::ComfortNoise, mode),
+                AmrFrameType::NoData => (FrameKind::NoData, mode),
+                AmrFrameType::SpeechLost => (FrameKind::Lost, mode),
+            };
+            // A lost frame has no mode of its own, so the last speech frame's
+            // is what the decoder conceals in.
+            if matches!(frame.frame_type, AmrFrameType::Speech(_)) {
+                mode = mode_here;
+            }
+            let coded = CodedFrame {
+                kind,
+                mode,
+                quality_ok: frame.quality_ok,
+                data: frame.data,
+            };
+            let pcm = codec
+                .decode_frame(&coded)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            samples.extend(pcm.iter().map(|sample| f32::from(*sample) * scale(16)));
+        }
+        Self::wrap(samples, 1, variant.sample_rate(), path)
     }
 
     /// Wraps decoded samples, rejecting a stream that holds no audio.
@@ -451,5 +504,58 @@ mod tests {
     fn a_missing_file_is_an_error() {
         let missing = std::env::temp_dir().join("blue-dove-no-such-file.ape");
         assert!(open(&missing).is_err());
+    }
+
+    #[test]
+    fn an_amr_file_decodes_every_frame_to_twenty_milliseconds() {
+        // Two narrowband mode-7 frames of silent bits. AMR carries no length,
+        // so the only way to know a file played whole is to count the frames:
+        // each is 20 ms, which at 8 kHz is 160 samples.
+        let mut data = b"#!AMR\n".to_vec();
+        let toc = (7 << 3) | (1 << 2);
+        data.extend_from_slice(&[toc]);
+        data.extend_from_slice(&[0; 31]);
+        data.extend_from_slice(&[toc]);
+        data.extend_from_slice(&[0; 31]);
+
+        let path = std::env::temp_dir().join(format!("blue-dove-amr-{}.amr", std::process::id()));
+        std::fs::write(&path, &data).expect("the fixture is written");
+        let decoded = Pcm::amr(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let file = decoded.expect("the file decodes");
+        assert_eq!(file.rate, 8_000, "narrowband is an 8 kHz stream");
+        assert_eq!(file.channels, 1, "AMR is mono");
+        assert_eq!(file.frames(), 320, "two frames of 160 samples");
+        assert_eq!(file.total_duration(), Some(Duration::from_millis(40)));
+    }
+
+    #[test]
+    fn an_amr_file_of_another_variant_reports_its_own_rate() {
+        // The wideband magic number is a different stream: 16 kHz and 320
+        // samples a frame. Reading it as narrowband would halve the length.
+        let mut data = b"#!AMR-WB\n".to_vec();
+        let toc = (8 << 3) | (1 << 2);
+        data.extend_from_slice(&[toc]);
+        data.extend_from_slice(&[0; 60]);
+
+        let path = std::env::temp_dir().join(format!("blue-dove-amrwb-{}.amr", std::process::id()));
+        std::fs::write(&path, &data).expect("the fixture is written");
+        let decoded = Pcm::amr(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let file = decoded.expect("the file decodes");
+        assert_eq!(file.rate, 16_000, "wideband is a 16 kHz stream");
+        assert_eq!(file.frames(), 320, "one frame of 320 samples");
+    }
+
+    #[test]
+    fn a_file_that_is_not_amr_is_refused() {
+        let path =
+            std::env::temp_dir().join(format!("blue-dove-badamr-{}.amr", std::process::id()));
+        std::fs::write(&path, b"not an AMR file at all").expect("the fixture is written");
+        let decoded = Pcm::amr(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(decoded.is_err(), "the magic number has to match");
     }
 }

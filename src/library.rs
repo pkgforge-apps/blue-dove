@@ -21,9 +21,9 @@ use walkdir::WalkDir;
 /// decoder of their own. DSD is not supported, and neither are TAK and WMA,
 /// which have no decoder that fits the licence.
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "aac", "adx", "aif", "aiff", "ape", "bcstm", "bfstm", "brstm", "caf", "dsp", "flac", "m4a",
-    "m4b", "mka", "mp+", "mp1", "mp2", "mp3", "mp4", "mpc", "mpp", "oga", "ogg", "opus", "shn",
-    "swag", "tta", "vag", "vig", "wav", "wv",
+    "aac", "adx", "aif", "aiff", "amr", "ape", "bcstm", "bfstm", "brstm", "caf", "dsp", "flac",
+    "m4a", "m4b", "mka", "mp+", "mp1", "mp2", "mp3", "mp4", "mpc", "mpp", "oga", "ogg", "opus",
+    "shn", "swag", "tta", "vag", "vig", "wav", "wv",
 ];
 
 /// File names looked up for album art when the tracks embed none.
@@ -595,7 +595,7 @@ fn is_hidden(path: &Path) -> bool {
 }
 
 /// Whether the path has an extension the decoder handles.
-fn has_audio_extension(path: &Path) -> bool {
+pub fn has_audio_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| AUDIO_EXTENSIONS.contains(&extension.to_lowercase().as_str()))
@@ -603,6 +603,18 @@ fn has_audio_extension(path: &Path) -> bool {
 
 /// Reads one file's tags. A file whose tags cannot be read is still played,
 /// under its file name, when it carries no tags at all.
+///
+/// `root` is what a track's directory is measured from. A file outside the
+/// music directory, which is what a file manager hands the app, is read with
+/// its own parent as the root, so it still gets a directory name.
+pub fn read_one(path: &Path) -> Option<Track> {
+    let root = path.parent().unwrap_or(path);
+    read_track(path, root, &mut Covers::default())
+}
+
+/// Reads one file's tags against `root`, which its directory is measured
+/// from. A file whose tags cannot be read at all is still played, under its
+/// file name.
 fn read_track(path: &Path, root: &Path, covers: &mut Covers) -> Option<Track> {
     // A game rip carries no tags lofty knows, so it is listed under its file
     // name instead of being dropped from the library.
