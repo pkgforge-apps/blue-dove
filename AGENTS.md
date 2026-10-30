@@ -467,6 +467,12 @@ Platform notes:
   empty box the size of a cover would be the largest thing in the window and
   say nothing. The menu a right click on the art gives, which is also the way
   out of the preview, is offered on the name line when there is no art.
+- `main.rs`'s `window_viewport` sets a maximum size for the preview alone, and
+  the full window asks for none rather than for an infinite one: Wayland
+  carries the max size as a `u32` on the client side and as an `i32` in the
+  protocol, so infinity arrives as -1, a size xdg-shell refuses, and a
+  compositor enforcing that, mutter among them, closes the window instead of
+  opening it.
 - A file opened through `instance::Request::Open`, which is what a file
   manager sends when the player is already running, previews exactly like a
   fresh launch: the two paths meet in `App::take_request`. Anything else

@@ -29,6 +29,43 @@ use eframe::egui;
 /// Window and taskbar icon, generated from `assets/icon.svg`.
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256.png");
 
+/// The viewport the window opens with, at the size it was given.
+///
+/// The preview is pinned: its floor and its ceiling are the one size it was
+/// given, so a window manager honouring size hints cannot stretch it. The
+/// full window has only a floor, and so no ceiling is set at all rather than
+/// an infinite one: winit carries the max size to Wayland as a `u32` and back
+/// as an `i32`, so an infinite one arrives as -1, a size xdg-shell refuses,
+/// and a compositor that checks it closes the window instead of opening it.
+fn window_viewport(
+    preview: bool,
+    start_size: [f32; 2],
+    icon: egui::IconData,
+) -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title(App::TITLE)
+        .with_app_id(App::ID)
+        .with_inner_size(start_size)
+        .with_resizable(!preview)
+        // The full window's floor is the compact layout's minimum, so the
+        // window can be shrunk into the popup and on down to the size the
+        // popup itself allows.
+        .with_min_inner_size(if preview {
+            start_size
+        } else {
+            app::COMPACT_MIN_SIZE
+        })
+        // The window is drawn translucent so the desktop shows through it; a
+        // compositor blends it, and without one it looks solid.
+        .with_transparent(true)
+        .with_icon(icon);
+    if preview {
+        viewport.with_max_inner_size(start_size)
+    } else {
+        viewport
+    }
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let smoke = args.iter().any(|arg| arg == "--smoke");
@@ -111,30 +148,7 @@ fn main() -> eframe::Result {
         app::DEFAULT_WINDOW_SIZE
     };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(App::TITLE)
-            .with_app_id(App::ID)
-            .with_inner_size(start_size)
-            .with_resizable(!preview)
-            // The full window's floor is the compact layout's minimum, so the
-            // window can be shrunk into the popup and on down to the size the
-            // popup itself allows. The preview is pinned instead: its floor
-            // and its ceiling are the one size it was given, so a window
-            // manager honouring size hints cannot stretch it either.
-            .with_min_inner_size(if preview {
-                start_size
-            } else {
-                app::COMPACT_MIN_SIZE
-            })
-            .with_max_inner_size(if preview {
-                start_size
-            } else {
-                [f32::INFINITY, f32::INFINITY]
-            })
-            // The window is drawn translucent so the desktop shows through
-            // it; a compositor blends it, and without one it looks solid.
-            .with_transparent(true)
-            .with_icon(icon),
+        viewport: window_viewport(preview, start_size, icon),
         ..Default::default()
     };
     let paths = cli.paths;
@@ -155,4 +169,32 @@ fn main() -> eframe::Result {
     // returned, so this is where it goes.
     drop(lock);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Any icon will do: the builder only carries it to the window.
+    fn icon() -> egui::IconData {
+        egui::IconData {
+            rgba: Vec::new(),
+            width: 1,
+            height: 1,
+        }
+    }
+
+    #[test]
+    fn the_full_window_asks_for_no_max_size() {
+        let viewport = window_viewport(false, app::DEFAULT_WINDOW_SIZE, icon());
+        assert_eq!(viewport.max_inner_size, None);
+    }
+
+    #[test]
+    fn the_preview_is_pinned_to_its_size() {
+        let size = egui::vec2(app::COMPACT_SIZE[0], app::COMPACT_SIZE[1]);
+        let viewport = window_viewport(true, app::COMPACT_SIZE, icon());
+        assert_eq!(viewport.max_inner_size, Some(size));
+        assert_eq!(viewport.min_inner_size, Some(size));
+    }
 }
