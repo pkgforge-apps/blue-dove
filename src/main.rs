@@ -89,22 +89,33 @@ fn main() -> eframe::Result {
     let icon =
         eframe::icon_data::from_png_bytes(ICON_PNG).expect("the bundled icon is a valid PNG");
     // A launch naming one audio file opens the preview, so the window starts
-    // at the popup's size rather than at the full one and then shrinking once
-    // the first frame has drawn.
+    // at the size the preview needs rather than at the full one and then
+    // shrinking once the first frame has drawn. The file is read here only
+    // for whether it carries art: a track without one gets no square, and
+    // the window is only as tall as the name, the controls and the waveform.
     let preview = App::preview_candidate(&cli.paths).is_some() && !smoke;
-    let start_size = if preview {
-        app::COMPACT_SIZE
+    let (start_size, min_size) = if preview {
+        let has_art = App::preview_candidate(&cli.paths)
+            .and_then(|path| crate::library::read_one(path))
+            .is_some_and(|track| track.cover.is_some());
+        let start = if has_art {
+            app::COMPACT_SIZE
+        } else {
+            app::PREVIEW_NO_ART_SIZE
+        };
+        (start, app::PREVIEW_MIN_SIZE)
     } else {
-        [1180.0, 760.0]
+        (app::DEFAULT_WINDOW_SIZE, app::COMPACT_SIZE)
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(App::TITLE)
             .with_app_id(App::ID)
             .with_inner_size(start_size)
-            // The floor is the compact layout's own size, so the window can
-            // be shrunk into the popup and no further.
-            .with_min_inner_size(app::COMPACT_SIZE)
+            // The preview is a window of its own and can be resized; the full
+            // window's floor is the compact layout's size, below which the
+            // album list and the table cannot be drawn.
+            .with_min_inner_size(min_size)
             // The window is drawn translucent so the desktop shows through
             // it; a compositor blends it, and without one it looks solid.
             .with_transparent(true)

@@ -53,6 +53,22 @@ pub const COMPACT_SIZE: [f32; 2] = [320.0, 414.0];
 /// becomes the popup: the menu bar, the art, the controls and the waveform.
 pub const COMPACT_BREAK: [f32; 2] = [560.0, 430.0];
 
+/// The size a preview opens at when its file carries no art, in points.
+///
+/// No square is drawn without art, so the window is only as tall as the line
+/// naming the track, the controls and the waveform.
+pub const PREVIEW_NO_ART_SIZE: [f32; 2] = [320.0, 92.0];
+
+/// The smallest the preview window may be made, in points.
+///
+/// The preview is a window of its own rather than a fixed-size popup, so it
+/// has to be resizable; the floor is low enough for the shortest layout, the
+/// one with no art.
+pub const PREVIEW_MIN_SIZE: [f32; 2] = [180.0, 72.0];
+
+/// The size the full window opens at, in points.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1180.0, 760.0];
+
 /// Whether a window of `size` shows the compact layout.
 pub fn compact_for(size: egui::Vec2) -> bool {
     size.x < COMPACT_BREAK[0] || size.y < COMPACT_BREAK[1]
@@ -376,7 +392,7 @@ impl App {
                 }
             }
         }
-        app.open_pending_paths();
+        app.open_pending_paths(ctx);
         app
     }
 
@@ -392,14 +408,14 @@ impl App {
     /// and a file manager's file is usually outside the music directory
     /// anyway, so holding it back would leave the full window on screen while
     /// a large library was read for a track none of it holds.
-    pub fn open_pending_paths(&mut self) {
+    pub fn open_pending_paths(&mut self, ctx: &egui::Context) {
         if let Some(paths) = &self.pending_paths
             && let Some(path) = Self::preview_candidate(paths)
             && self.preview_enabled
         {
             let path = path.clone();
             self.pending_paths = None;
-            self.open_preview(&path);
+            self.open_preview(ctx, &path);
             return;
         }
         if self.scan.is_some() {
@@ -473,14 +489,31 @@ impl App {
     /// The file is read on its own rather than found in the library, so a
     /// path anywhere plays: a file manager names files that need not be in
     /// the music directory. Nothing the user has in a tab is replaced.
-    pub fn open_preview(&mut self, path: &std::path::Path) {
+    ///
+    /// The window is given the size the file needs: art makes it square and
+    /// tall, and a file with none is only as tall as its name, its controls
+    /// and the waveform. The floor is lowered to the preview's own minimum,
+    /// since the compact popup's floor is as large as this window.
+    pub fn open_preview(&mut self, ctx: &egui::Context, path: &std::path::Path) {
         let Some(track) = crate::library::read_one(path) else {
             self.report_missing(path);
             return;
         };
         self.queue = None;
         self.forget_shuffle();
+        let size = if track.cover.is_some() {
+            COMPACT_SIZE
+        } else {
+            PREVIEW_NO_ART_SIZE
+        };
         self.play_file(track);
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            PREVIEW_MIN_SIZE[0],
+            PREVIEW_MIN_SIZE[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            size[0], size[1],
+        )));
     }
 
     /// Plays `track` on its own, outside any playlist.
@@ -526,10 +559,22 @@ impl App {
     /// disagree. A file the library does not hold cannot go into a playlist,
     /// which stores paths the next scan has to find again, so it is left out
     /// and the window shows what it had.
-    pub fn leave_preview(&mut self) {
+    pub fn leave_preview(&mut self, ctx: &egui::Context) {
         let Some(track) = self.preview.take() else {
             return;
         };
+        // The window goes back to the full layout's floor and its own size:
+        // the preview's floor is far below what the album list and the table
+        // need, and a window left that small would open onto a squeezed
+        // popup.
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            COMPACT_SIZE[0],
+            COMPACT_SIZE[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            DEFAULT_WINDOW_SIZE[0],
+            DEFAULT_WINDOW_SIZE[1],
+        )));
         let Some(index) = self.track_of(&track.path) else {
             self.status = Some(format!(
                 "{} is outside the music directory",
@@ -682,7 +727,7 @@ impl App {
         }
 
         // A path given at startup could not be found until the scan landed.
-        self.open_pending_paths();
+        self.open_pending_paths(ctx);
 
         if self.scan.is_some() || self.waveform.is_some() || self.picker.is_some() {
             ctx.request_repaint_after(Duration::from_millis(120));
@@ -1369,12 +1414,12 @@ impl App {
     /// Turning it off while the preview is showing leaves it for the window,
     /// so the setting and what is drawn never disagree: the preview has no
     /// menu bar to turn it back on from.
-    pub fn set_preview_enabled(&mut self, enabled: bool) {
+    pub fn set_preview_enabled(&mut self, ctx: &egui::Context, enabled: bool) {
         self.preview_enabled = enabled;
         self.config.preview = Some(enabled);
         self.save_settings();
         if !enabled {
-            self.leave_preview();
+            self.leave_preview(ctx);
         }
     }
 
@@ -1681,7 +1726,7 @@ impl App {
             if self.repeat
                 && let Some(track) = self.preview.take()
             {
-                self.open_preview(&track.path);
+                self.open_preview(ctx, &track.path);
             }
             return;
         }
@@ -2511,7 +2556,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A", "B"])]);
         let queued = app.playlists.current().tracks.clone();
         let path = app.library.tracks[0].path.clone();
-        app.open_preview(&path);
+        app.open_preview(&egui::Context::default(), &path);
 
         assert!(app.preview.is_some(), "the window is showing the preview");
         assert_eq!(
@@ -2526,9 +2571,9 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
         app.playlists.current_mut().set([0]);
         let path = app.library.tracks[1].path.clone();
-        app.open_preview(&path);
+        app.open_preview(&egui::Context::default(), &path);
 
-        app.leave_preview();
+        app.leave_preview(&egui::Context::default());
         assert!(
             app.preview.is_none(),
             "the window is back to its normal layout"
@@ -2543,7 +2588,7 @@ pub(crate) mod tests {
     #[test]
     fn turning_the_preview_off_leaves_it() {
         let mut app = app_with(&[("One", &["A", "B"])]);
-        app.set_preview_enabled(false);
+        app.set_preview_enabled(&egui::Context::default(), false);
 
         assert!(!app.preview_enabled);
         assert!(
@@ -2566,7 +2611,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A"])]);
         let queued = app.playlists.current().tracks.clone();
         app.pending_paths = Some(vec![file.clone()]);
-        app.open_pending_paths();
+        app.open_pending_paths(&egui::Context::default());
 
         // The file cannot be decoded, so nothing plays; what the test pins is
         // that the launch took the preview path rather than the playlist one.
@@ -2604,7 +2649,7 @@ pub(crate) mod tests {
         assert!(app.scan.is_some(), "the scan is running");
 
         app.pending_paths = Some(vec![file.clone()]);
-        app.open_pending_paths();
+        app.open_pending_paths(&egui::Context::default());
 
         assert_eq!(
             app.preview.as_ref().map(|track| track.path.clone()),
@@ -2620,6 +2665,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_preview_without_art_asks_for_a_shorter_window_than_one_with_it() {
+        // Without art there is no square to draw, so the window is only as
+        // tall as the name line, the controls and the waveform. The two sizes
+        // must differ, or a file with no cover would sit in a window of empty
+        // background where the art would have been.
+        const { assert!(PREVIEW_NO_ART_SIZE[1] < COMPACT_SIZE[1]) };
+        const { assert!(PREVIEW_NO_ART_SIZE[0] <= COMPACT_SIZE[0]) };
+        const { assert!(PREVIEW_MIN_SIZE[0] < COMPACT_SIZE[0]) };
+        const { assert!(PREVIEW_MIN_SIZE[1] < COMPACT_SIZE[1]) };
+    }
+
+    #[test]
     fn a_previewed_file_outside_the_library_is_read_on_its_own() {
         // The case a file manager sends: a path the library knows nothing
         // about. It still has to reach the preview.
@@ -2629,7 +2686,7 @@ pub(crate) mod tests {
         std::fs::write(&file, b"not really audio").expect("the file is written");
 
         let mut app = app_with(&[("One", &["A"])]);
-        app.open_preview(&file);
+        app.open_preview(&egui::Context::default(), &file);
         assert_eq!(
             app.preview.as_ref().map(|track| track.path.clone()),
             Some(file.clone()),

@@ -573,11 +573,12 @@ impl App {
                     )
                     .on_hover_text("Leaves out files and directories whose name starts with a dot");
 
+                    let ctx = ui.ctx().clone();
                     self.setting_checkbox(
                         ui,
                         "Preview a single file",
                         self.preview_enabled,
-                        Self::set_preview_enabled,
+                        |app, value| app.set_preview_enabled(&ctx, value),
                     )
                     .on_hover_text(
                         "Opens a launch naming one audio file as a small player \
@@ -633,6 +634,14 @@ impl App {
     fn now_playing(&mut self, ui: &mut egui::Ui, compact: bool) {
         let texture = self.playing_cover(ui.ctx());
 
+        // A track with no art gets no square at all: an empty box the size of
+        // a cover is the largest thing in the window and says nothing. What
+        // the player draws then is the name, the controls and the waveform.
+        if texture.is_none() {
+            self.name_and_controls(ui, compact);
+            return;
+        }
+
         // The art leaves room for the margin around it and stops short of
         // the controls, which sit below rather than over the cover.
         let art_room = (ui.available_width() - 2.0 * ART_MARGIN).max(1.0);
@@ -673,42 +682,57 @@ impl App {
                 }
                 _ => cover(ui, rect, texture.as_ref(), 10),
             }
-            response.context_menu(|ui| {
-                if ui
-                    .selectable_label(!self.cover_fit, "Fill the space")
-                    .on_hover_text("Crops art that is not square, so no background shows")
-                    .clicked()
-                {
-                    self.set_cover_fit(false);
-                    ui.close();
-                }
-                if ui
-                    .selectable_label(self.cover_fit, "Fit the whole image")
-                    .on_hover_text("Shows all of the art, with the space beside it as background")
-                    .clicked()
-                {
-                    self.set_cover_fit(true);
-                    ui.close();
-                }
-                // The preview has no menu bar, so the way out of it is here.
-                if self.preview.is_some() {
-                    ui.separator();
-                    if ui.button("Open the Window").clicked() {
-                        self.leave_preview();
-                        ui.close();
-                    }
-                }
-            });
+            response.context_menu(|ui| self.art_menu(ui));
         });
 
         // The popup keeps the name line close to the art and the controls:
         // the gaps around it are the only slack in a window this small.
         ui.add_space(if compact { 2.0 } else { 6.0 });
 
-        // The popup has no table to read the track from, so it names the
-        // track between the art and the controls.
+        self.name_and_controls(ui, compact);
+    }
+
+    /// What a right click on the art offers.
+    ///
+    /// The preview has no menu bar, so this is also the way out of it.
+    fn art_menu(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .selectable_label(!self.cover_fit, "Fill the space")
+            .on_hover_text("Crops art that is not square, so no background shows")
+            .clicked()
+        {
+            self.set_cover_fit(false);
+            ui.close();
+        }
+        if ui
+            .selectable_label(self.cover_fit, "Fit the whole image")
+            .on_hover_text("Shows all of the art, with the space beside it as background")
+            .clicked()
+        {
+            self.set_cover_fit(true);
+            ui.close();
+        }
+        if self.preview.is_some() {
+            ui.separator();
+            if ui.button("Open the Window").clicked() {
+                self.leave_preview(ui.ctx());
+                ui.close();
+            }
+        }
+    }
+
+    /// The line naming the track, then the control strip.
+    ///
+    /// The popup has no table to read the track from, so it names the track
+    /// between the art and the controls. A track with no art is drawn without
+    /// a square above it, and the menu a right click on the art gives is
+    /// offered on the name line instead, since that is what is left.
+    fn name_and_controls(&mut self, ui: &mut egui::Ui, compact: bool) {
         if compact {
-            self.compact_name(ui);
+            let response = self.compact_name(ui);
+            if self.playing_cover(ui.ctx()).is_none() {
+                response.context_menu(|ui| self.art_menu(ui));
+            }
         }
 
         // The controls get a strip of their own, the width of the art.
@@ -734,11 +758,12 @@ impl App {
     /// The position follows it in the table's own form, `- 0:21/2:14`. The
     /// line keeps its height with nothing playing, so starting a track does
     /// not resize the popup.
-    fn compact_name(&mut self, ui: &mut egui::Ui) {
+    fn compact_name(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let width = ui.available_width().max(1.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, COMPACT_NAME_HEIGHT), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(width, COMPACT_NAME_HEIGHT), Sense::click());
         let Some(name) = self.playing_name() else {
-            return;
+            return response;
         };
         let position = self.position();
         let suffix = (!self.length.is_zero()).then(|| progress_text(position, self.length));
@@ -761,6 +786,7 @@ impl App {
         if let Some(suffix) = suffix {
             painter.galley(pos2(left + name.size().x, top), suffix, accent);
         }
+        response
     }
 
     /// The transport, the two playback modes and the volume, in reading
