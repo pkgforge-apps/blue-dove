@@ -156,6 +156,13 @@ into that licence. The chiptune formats, which play a console's sound
 chips rather than samples, are left out too: SPC, NSF, GBS, VGM and the
 PlayStation sound formats would each need a whole console emulated.
 
+A file manager opens a track in the player for the formats the desktop
+has a mimetype for: FLAC, MP3, M4A, AAC, Ogg Vorbis, Opus, WAV, AIFF,
+Monkey's Audio, WavPack, TTA, Musepack, Shorten, AMR and Matroska audio.
+shared-mime-info knows no mimetype for the game rip formats, nor for CAF
+and MP1, so no file manager offers the player for those: name the file on
+the command line or drop it on the window instead.
+
 ## The command line
 
 `blue-dove --help` lists the flags. Two things are worth knowing beyond the
