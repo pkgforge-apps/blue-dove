@@ -1,4 +1,10 @@
 
+## [0.1.7](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.6...v0.1.7) - 2026-10-30
+
+### Bug Fixes
+
+- *(theme)* Read the desktop from XDG_CURRENT_DESKTOP ([#14](https://github.com/pkgforge-apps/blue-dove/pull/14)) - ([0dfb13f](https://github.com/pkgforge-apps/blue-dove/commit/0dfb13f86b01bbe4e0d900e73cf8b819be791658))
+
 ## [0.1.6](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.5...v0.1.6) - 2026-10-30
 
 ### Features
