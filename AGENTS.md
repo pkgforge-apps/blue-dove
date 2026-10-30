@@ -545,10 +545,14 @@ Platform notes:
   250 ms, which is all a client reading the position needs.
 - Below `COMPACT_BREAK` the window drops the album list and the playlist
   and shows only the menu bar, the art, the controls and a thin waveform.
-  It snaps to `COMPACT_SIZE` once, when it crosses into that layout, so
-  the window manager is not fought while the user drags; growing it back
-  past the break restores the full layout. `COMPACT_SIZE` is also the
-  window's minimum size. The art keeps its full width in the popup, and
+  It snaps once, when it crosses into that layout, so the window manager
+  is not fought while the user drags; growing it back past the break
+  restores the full layout. The snap is `COMPACT_SIZE` when the track has
+  art and the shorter `COMPACT_NO_ART_SIZE` when it does not, so a missing
+  square leaves no empty height behind. The popup stays resizable:
+  `COMPACT_MIN_SIZE` is its floor, deliberately below both snap sizes,
+  since a floor equal to the snap size would pin the window. The art keeps
+  its full width in the popup, and
   the window is made tall enough for the line naming the track
   (`compact_name`: the name, or the file name, then its position, both in
   the accent) between the art and the controls; shrinking the art to fit

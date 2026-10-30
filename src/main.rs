@@ -116,15 +116,15 @@ fn main() -> eframe::Result {
             .with_app_id(App::ID)
             .with_inner_size(start_size)
             .with_resizable(!preview)
-            // The full window's floor is the compact layout's size, below
-            // which the album list and the table cannot be drawn. The preview
-            // is pinned instead: its floor and its ceiling are the one size it
-            // was given, so a window manager honouring size hints cannot
-            // stretch it either.
+            // The full window's floor is the compact layout's minimum, so the
+            // window can be shrunk into the popup and on down to the size the
+            // popup itself allows. The preview is pinned instead: its floor
+            // and its ceiling are the one size it was given, so a window
+            // manager honouring size hints cannot stretch it either.
             .with_min_inner_size(if preview {
                 start_size
             } else {
-                app::COMPACT_SIZE
+                app::COMPACT_MIN_SIZE
             })
             .with_max_inner_size(if preview {
                 start_size
