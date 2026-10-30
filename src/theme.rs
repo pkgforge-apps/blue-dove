@@ -322,20 +322,13 @@ impl Theme {
         }
     }
 
-    /// The theme a first launch starts on, read from the session.
+    /// The theme a first launch starts on, read from the desktop.
     ///
-    /// `XDG_SESSION_TYPE` is what the app was told to read, but on a real
-    /// desktop it holds the display protocol (`x11`, `wayland`) rather than
-    /// the desktop, so `XDG_CURRENT_DESKTOP`, where `KDE` actually appears,
-    /// is read as well. This only decides the first run: once the settings
-    /// hold a theme, that choice stands.
+    /// `XDG_CURRENT_DESKTOP` names the desktop, which is what decides the
+    /// palette. This only decides the first run: once the settings hold a
+    /// theme, that choice stands.
     pub fn first_run() -> Self {
-        let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        match Self::for_desktop(&session) {
-            Self::Default => Self::for_desktop(&desktop),
-            chosen => chosen,
-        }
+        Self::for_desktop(&std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
     }
 }
 
@@ -476,15 +469,16 @@ mod tests {
     }
 
     #[test]
-    fn a_kde_session_starts_on_breeze_dark_and_the_rest_on_the_app_palette() {
+    fn a_kde_desktop_starts_on_breeze_dark_and_the_rest_on_the_app_palette() {
         // Only KDE changes the answer: the other desktops keep the app's own
-        // dark palette, which is the one the icon was drawn for.
+        // dark palette, which is the one the icon was drawn for. The value is
+        // `XDG_CURRENT_DESKTOP`'s, which lists desktops separated by colons.
         assert_eq!(Theme::for_desktop("KDE"), Theme::BreezeDark);
         assert_eq!(Theme::for_desktop("kde"), Theme::BreezeDark);
-        assert_eq!(Theme::for_desktop("KDE;Plasma"), Theme::BreezeDark);
-        assert_eq!(Theme::for_desktop("x11"), Theme::Default);
-        assert_eq!(Theme::for_desktop("wayland"), Theme::Default);
+        assert_eq!(Theme::for_desktop("KDE:Plasma"), Theme::BreezeDark);
         assert_eq!(Theme::for_desktop("GNOME"), Theme::Default);
+        assert_eq!(Theme::for_desktop("ubuntu:GNOME"), Theme::Default);
+        assert_eq!(Theme::for_desktop("XFCE"), Theme::Default);
         assert_eq!(Theme::for_desktop(""), Theme::Default);
     }
 
