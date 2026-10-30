@@ -67,11 +67,12 @@ pub const PREVIEW_NO_ART_SIZE: [f32; 2] = [320.0, 92.0];
 /// would leave the height the art would have taken as empty background.
 pub const COMPACT_NO_ART_SIZE: [f32; 2] = [320.0, 100.0];
 
-/// The smallest the window may be made in the compact layout, in points.
+/// The smallest the window may be made in the full layout, in points.
 ///
-/// The compact layout is resizable, unlike the preview: this is a floor wide
-/// enough for the control strip and tall enough for the waveform, not the
-/// size the layout opens at.
+/// It is below [`COMPACT_BREAK`], so the window can be dragged down out of the
+/// full layout and into the popup at all. Once it is in the popup its floor
+/// becomes the size the popup picked for itself, so this is not the popup's
+/// floor.
 pub const COMPACT_MIN_SIZE: [f32; 2] = [240.0, 84.0];
 
 /// The size the full window opens at, in points.
@@ -1710,19 +1711,41 @@ impl App {
             return;
         }
         self.compact = compact;
-        if compact && self.preview.is_none() {
-            // The popup snaps to the size its content needs, so a track with
-            // no art does not carry the height the square would have taken as
-            // empty background. It is snapped once, on the way in; after that
-            // the compact layout is resized freely, which is what the floor
-            // being `COMPACT_MIN_SIZE` rather than the snap size allows.
+        // The preview pins itself to one size and is not the layout's to
+        // resize.
+        if self.preview.is_some() {
+            return;
+        }
+        if compact {
+            // The popup picks the size its content needs, so a track with no
+            // art does not carry the height the square would have taken as
+            // empty background. That size is also its floor: it can be made
+            // larger, but never smaller than the layout it picked, or the
+            // controls and the waveform would be squeezed out of a window
+            // that has no room for them. The ceiling is lifted so growing
+            // back past the break returns to the full layout.
             let size = if self.playing_cover(ctx).is_some() {
                 COMPACT_SIZE
             } else {
                 COMPACT_NO_ART_SIZE
             };
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(
+                f32::INFINITY,
+                f32::INFINITY,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                size[0], size[1],
+            )));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 size[0], size[1],
+            )));
+        } else {
+            // Back in the full layout, the floor drops to the smallest the
+            // window may be at all, which is what lets it be dragged down
+            // into the popup again.
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                COMPACT_MIN_SIZE[0],
+                COMPACT_MIN_SIZE[1],
             )));
         }
     }
@@ -3320,24 +3343,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_popup_snaps_shorter_without_art_and_stays_resizable() {
+    fn the_popup_picks_a_size_and_will_not_go_below_it() {
         // The popup is snapped to what its content needs: with a square the
         // full height, without one the height of the name line, the controls
         // and the waveform. The empty height of a missing square was being
         // taken by the gap above the waveform.
         const { assert!(COMPACT_NO_ART_SIZE[1] < COMPACT_SIZE[1]) };
         const { assert!(COMPACT_NO_ART_SIZE[0] == COMPACT_SIZE[0]) };
-        // The floor is below the snap, or the window could not be resized
-        // once it was in the popup: a floor equal to the snap size is what
-        // pinned it there.
-        const { assert!(COMPACT_MIN_SIZE[0] < COMPACT_NO_ART_SIZE[0]) };
-        const { assert!(COMPACT_MIN_SIZE[1] < COMPACT_NO_ART_SIZE[1]) };
         // Both snap sizes land in the popup layout, so neither flickers back
-        // to the full one.
+        // to the full one, and each is its own floor: the window may grow
+        // from there but not shrink, since the controls and the waveform need
+        // the room the layout picked.
         assert!(compact_for(egui::vec2(
             COMPACT_NO_ART_SIZE[0],
             COMPACT_NO_ART_SIZE[1]
         )));
+        assert!(compact_for(egui::vec2(COMPACT_SIZE[0], COMPACT_SIZE[1])));
+        // The full layout's floor is below the break, which is what lets the
+        // window be dragged down into the popup at all.
+        const { assert!(COMPACT_MIN_SIZE[0] < COMPACT_BREAK[0]) };
+        const { assert!(COMPACT_MIN_SIZE[1] < COMPACT_BREAK[1]) };
     }
 
     #[test]

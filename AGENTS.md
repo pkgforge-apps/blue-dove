@@ -549,9 +549,13 @@ Platform notes:
   is not fought while the user drags; growing it back past the break
   restores the full layout. The snap is `COMPACT_SIZE` when the track has
   art and the shorter `COMPACT_NO_ART_SIZE` when it does not, so a missing
-  square leaves no empty height behind. The popup stays resizable:
-  `COMPACT_MIN_SIZE` is its floor, deliberately below both snap sizes,
-  since a floor equal to the snap size would pin the window. The art keeps
+  square leaves no empty height behind. The popup stays resizable but the
+  size it picked is also its floor, so it can be made larger and not
+  smaller: below that the controls and the waveform are squeezed out of a
+  window with no room for them. The ceiling is lifted with it, so growing
+  back past the break still returns the full layout, and the floor drops to
+  `COMPACT_MIN_SIZE` again on the way out, which is what lets the window be
+  dragged back down into the popup. The art keeps
   its full width in the popup, and
   the window is made tall enough for the line naming the track
   (`compact_name`: the name, or the file name, then its position, both in
