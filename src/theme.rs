@@ -131,6 +131,96 @@ impl Palette {
             light: true,
         }
     }
+
+    /// Nord, the arctic blue palette.
+    pub const fn nord() -> Self {
+        Self {
+            background: (0x2e, 0x34, 0x40),
+            panel: (0x3b, 0x42, 0x52),
+            recess: (0x27, 0x2c, 0x36),
+            placeholder: (0x43, 0x4c, 0x5e),
+            widget: (0x43, 0x4c, 0x5e),
+            hovered: (0x4c, 0x56, 0x6a),
+            active: (0x5a, 0x65, 0x7d),
+            border: (0x20, 0x24, 0x2c),
+            text: Color32::from_rgb(0xec, 0xef, 0xf4),
+            weak_text: Color32::from_rgb(0xa7, 0xb1, 0xc2),
+            accent: Color32::from_rgb(0x88, 0xc0, 0xd0),
+            light: false,
+        }
+    }
+
+    /// Catppuccin Mocha, the dark flavour.
+    pub const fn catppuccin_mocha() -> Self {
+        Self {
+            background: (0x1e, 0x1e, 0x2e),
+            panel: (0x18, 0x18, 0x25),
+            recess: (0x11, 0x11, 0x1b),
+            placeholder: (0x31, 0x32, 0x44),
+            widget: (0x31, 0x32, 0x44),
+            hovered: (0x45, 0x47, 0x5a),
+            active: (0x58, 0x5b, 0x70),
+            border: (0x11, 0x11, 0x1b),
+            text: Color32::from_rgb(0xcd, 0xd6, 0xf4),
+            weak_text: Color32::from_rgb(0xa6, 0xad, 0xc8),
+            accent: Color32::from_rgb(0x89, 0xb4, 0xfa),
+            light: false,
+        }
+    }
+
+    /// Catppuccin Latte, the light flavour.
+    pub const fn catppuccin_latte() -> Self {
+        Self {
+            background: (0xef, 0xf1, 0xf5),
+            panel: (0xe6, 0xe9, 0xef),
+            recess: (0xdc, 0xe0, 0xe8),
+            placeholder: (0xcc, 0xd0, 0xda),
+            widget: (0xcc, 0xd0, 0xda),
+            hovered: (0xbc, 0xc0, 0xcc),
+            active: (0xac, 0xb0, 0xbe),
+            border: (0xbc, 0xc0, 0xcc),
+            text: Color32::from_rgb(0x4c, 0x4f, 0x69),
+            weak_text: Color32::from_rgb(0x6c, 0x6f, 0x85),
+            accent: Color32::from_rgb(0x1e, 0x66, 0xf5),
+            light: true,
+        }
+    }
+
+    /// Solarized dark, built on base03 and base02.
+    pub const fn solarized_dark() -> Self {
+        Self {
+            background: (0x00, 0x2b, 0x36),
+            panel: (0x07, 0x36, 0x42),
+            recess: (0x00, 0x1e, 0x26),
+            placeholder: (0x0d, 0x4b, 0x5c),
+            widget: (0x07, 0x36, 0x42),
+            hovered: (0x0e, 0x51, 0x62),
+            active: (0x15, 0x5a, 0x6b),
+            border: (0x00, 0x25, 0x2e),
+            text: Color32::from_rgb(0x93, 0xa1, 0xa1),
+            weak_text: Color32::from_rgb(0x65, 0x7b, 0x83),
+            accent: Color32::from_rgb(0x26, 0x8b, 0xd2),
+            light: false,
+        }
+    }
+
+    /// Solarized light, built on base3 and base2.
+    pub const fn solarized_light() -> Self {
+        Self {
+            background: (0xfd, 0xf6, 0xe3),
+            panel: (0xee, 0xe8, 0xd5),
+            recess: (0xff, 0xfb, 0xf0),
+            placeholder: (0xe4, 0xdd, 0xc9),
+            widget: (0xee, 0xe8, 0xd5),
+            hovered: (0xe0, 0xd9, 0xc6),
+            active: (0xd3, 0xcc, 0xb8),
+            border: (0xdd, 0xd6, 0xc1),
+            text: Color32::from_rgb(0x65, 0x7b, 0x83),
+            weak_text: Color32::from_rgb(0x93, 0xa1, 0xa1),
+            accent: Color32::from_rgb(0x26, 0x8b, 0xd2),
+            light: true,
+        }
+    }
 }
 
 /// A palette the user can pick, with the name shown in the View menu.
@@ -147,16 +237,31 @@ pub enum Theme {
     BreezeLight,
     /// Breeze, dark.
     BreezeDark,
+    /// Nord, the arctic blue palette.
+    Nord,
+    /// Catppuccin Mocha, the dark flavour.
+    CatppuccinMocha,
+    /// Catppuccin Latte, the light flavour.
+    CatppuccinLatte,
+    /// Solarized, dark.
+    SolarizedDark,
+    /// Solarized, light.
+    SolarizedLight,
 }
 
 impl Theme {
     /// Every theme, in the order the View menu lists them.
-    pub const ALL: [Theme; 5] = [
+    pub const ALL: [Theme; 10] = [
         Theme::Default,
         Theme::AdwaitaLight,
         Theme::AdwaitaDark,
         Theme::BreezeLight,
         Theme::BreezeDark,
+        Theme::Nord,
+        Theme::CatppuccinMocha,
+        Theme::CatppuccinLatte,
+        Theme::SolarizedDark,
+        Theme::SolarizedLight,
     ];
 
     /// The name shown in the menu.
@@ -167,6 +272,11 @@ impl Theme {
             Theme::AdwaitaDark => "Adwaita Dark",
             Theme::BreezeLight => "Breeze Light",
             Theme::BreezeDark => "Breeze Dark",
+            Theme::Nord => "Nord",
+            Theme::CatppuccinMocha => "Catppuccin Mocha",
+            Theme::CatppuccinLatte => "Catppuccin Latte",
+            Theme::SolarizedDark => "Solarized Dark",
+            Theme::SolarizedLight => "Solarized Light",
         }
     }
 
@@ -178,6 +288,11 @@ impl Theme {
             Theme::AdwaitaDark => Palette::adwaita_dark(),
             Theme::BreezeLight => Palette::breeze_light(),
             Theme::BreezeDark => Palette::breeze_dark(),
+            Theme::Nord => Palette::nord(),
+            Theme::CatppuccinMocha => Palette::catppuccin_mocha(),
+            Theme::CatppuccinLatte => Palette::catppuccin_latte(),
+            Theme::SolarizedDark => Palette::solarized_dark(),
+            Theme::SolarizedLight => Palette::solarized_light(),
         }
     }
 
@@ -191,6 +306,36 @@ impl Theme {
     /// The name the settings file stores.
     pub fn key(self) -> &'static str {
         self.name()
+    }
+
+    /// The theme a desktop session should start on.
+    ///
+    /// Only KDE changes the answer: its programs look wrong in the app's own
+    /// palette next to a Breeze window, so the KDE session gets Breeze Dark.
+    /// Every other desktop keeps the app's own dark theme, which is the one
+    /// the icon was drawn for.
+    pub fn for_desktop(session: &str) -> Self {
+        if session.to_ascii_lowercase().contains("kde") {
+            Self::BreezeDark
+        } else {
+            Self::Default
+        }
+    }
+
+    /// The theme a first launch starts on, read from the session.
+    ///
+    /// `XDG_SESSION_TYPE` is what the app was told to read, but on a real
+    /// desktop it holds the display protocol (`x11`, `wayland`) rather than
+    /// the desktop, so `XDG_CURRENT_DESKTOP`, where `KDE` actually appears,
+    /// is read as well. This only decides the first run: once the settings
+    /// hold a theme, that choice stands.
+    pub fn first_run() -> Self {
+        let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        match Self::for_desktop(&session) {
+            Self::Default => Self::for_desktop(&desktop),
+            chosen => chosen,
+        }
     }
 }
 
@@ -328,6 +473,19 @@ mod tests {
         let panel = Palette::default_theme().panel;
         assert_eq!(fade(panel, 2.0).a(), 255);
         assert_eq!(fade(panel, -1.0).a(), 0);
+    }
+
+    #[test]
+    fn a_kde_session_starts_on_breeze_dark_and_the_rest_on_the_app_palette() {
+        // Only KDE changes the answer: the other desktops keep the app's own
+        // dark palette, which is the one the icon was drawn for.
+        assert_eq!(Theme::for_desktop("KDE"), Theme::BreezeDark);
+        assert_eq!(Theme::for_desktop("kde"), Theme::BreezeDark);
+        assert_eq!(Theme::for_desktop("KDE;Plasma"), Theme::BreezeDark);
+        assert_eq!(Theme::for_desktop("x11"), Theme::Default);
+        assert_eq!(Theme::for_desktop("wayland"), Theme::Default);
+        assert_eq!(Theme::for_desktop("GNOME"), Theme::Default);
+        assert_eq!(Theme::for_desktop(""), Theme::Default);
     }
 
     #[test]

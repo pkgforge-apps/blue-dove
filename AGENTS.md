@@ -400,6 +400,15 @@ Platform notes:
   the library is rescanned at every start. They are written as they
   change and again on exit, so a killed window loses nothing; a smoke
   run writes nothing at all.
+- Ten themes: the app's own palette, Adwaita and Breeze in both variants,
+  Nord, Catppuccin Mocha and Latte, and Solarized Dark and Light. A stored
+  theme is what the window shows; only a first run with none stored asks
+  the session, through `Theme::first_run`. KDE gets Breeze Dark, since its
+  programs look wrong in an amber palette beside a Breeze window, and every
+  other desktop keeps the app's own dark theme. `XDG_SESSION_TYPE` is read
+  because that is the variable the app was asked to follow, but on a real
+  desktop it holds the protocol (`x11`, `wayland`), so `XDG_CURRENT_DESKTOP`
+  is read too; `Theme::for_desktop` is the pure part the test drives.
 - `mpris.rs` serves MPRIS on the session bus, so playerctl and the media
   keys work. The bus is optional: the service is connected on its own
   thread, and a host without a bus, or with another player holding the

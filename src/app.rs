@@ -306,11 +306,14 @@ impl App {
         let transparency = config.transparency.unwrap_or(true);
         let repeat = config.repeat.unwrap_or(false);
         let random = config.random.unwrap_or(false);
+        // A theme the user picked stands. With none stored this is a first
+        // run, so the session decides: KDE gets Breeze Dark, everything else
+        // the app's own dark palette.
         let theme = config
             .theme
             .as_deref()
             .and_then(crate::theme::Theme::from_name)
-            .unwrap_or_default();
+            .unwrap_or_else(crate::theme::Theme::first_run);
         let stored_columns = config
             .column_widths
             .map(sane_columns)
