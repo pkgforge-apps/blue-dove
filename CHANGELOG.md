@@ -1,4 +1,10 @@
 
+## [0.1.6](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.5...v0.1.6) - 2026-10-30
+
+### Features
+
+- *(theme)* Add Nord, Catppuccin and Solarized - ([2bf1d74](https://github.com/pkgforge-apps/blue-dove/commit/2bf1d74a678402f1011a640394ac4893cbef9f07))
+
 ## [0.1.5](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.4...v0.1.5) - 2026-10-30
 
 ### Features
