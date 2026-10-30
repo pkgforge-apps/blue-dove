@@ -88,11 +88,20 @@ fn main() -> eframe::Result {
 
     let icon =
         eframe::icon_data::from_png_bytes(ICON_PNG).expect("the bundled icon is a valid PNG");
+    // A launch naming one audio file opens the preview, so the window starts
+    // at the popup's size rather than at the full one and then shrinking once
+    // the first frame has drawn.
+    let preview = App::preview_candidate(&cli.paths).is_some() && !smoke;
+    let start_size = if preview {
+        app::COMPACT_SIZE
+    } else {
+        [1180.0, 760.0]
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(App::TITLE)
             .with_app_id(App::ID)
-            .with_inner_size([1180.0, 760.0])
+            .with_inner_size(start_size)
             // The floor is the compact layout's own size, so the window can
             // be shrunk into the popup and no further.
             .with_min_inner_size(app::COMPACT_SIZE)

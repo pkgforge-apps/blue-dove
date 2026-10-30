@@ -14,7 +14,7 @@ use eframe::egui;
 
 use crate::config::{Config, SavedPlaylist};
 use crate::dialog;
-use crate::library::{Library, ScanMessage};
+use crate::library::{Library, ScanMessage, Track};
 use crate::mpris::{Command, Playback};
 use crate::player::Audio;
 use crate::playlist::Playlists;
@@ -234,6 +234,15 @@ pub struct App {
     /// Whether the album art is fitted whole into its square, rather than
     /// cropped to fill it.
     pub(crate) cover_fit: bool,
+    /// Whether a launch naming one audio file opens the preview.
+    pub(crate) preview_enabled: bool,
+    /// The file the preview is showing, when it is.
+    ///
+    /// The preview draws the art, the controls and the waveform only, and
+    /// its track is in no playlist. The track is read from the file rather
+    /// than taken from the library, so a file anywhere plays: a file manager
+    /// hands over paths that need not be under the music directory.
+    pub(crate) preview: Option<Track>,
     /// Whether the user asked to quit, which a window closing is not.
     pub(crate) quitting: bool,
 }
@@ -279,6 +288,7 @@ impl App {
         let background = config.background.unwrap_or(false);
         let ignore_hidden = config.ignore_hidden.unwrap_or(true);
         let cover_fit = config.cover_fit.unwrap_or(false);
+        let preview_enabled = config.preview.unwrap_or(true);
         // The bus is reached on a thread of its own, so a host without one,
         // or with one that is slow to answer, never holds up the window.
         let (remote, service) = if smoke {
@@ -330,6 +340,8 @@ impl App {
             background,
             ignore_hidden,
             cover_fit,
+            preview_enabled,
+            preview: None,
             quitting: false,
         };
         match app.config.music_directory.clone() {
@@ -372,7 +384,24 @@ impl App {
     ///
     /// A path given at startup may arrive before the scan has finished, so it
     /// waits in `pending_paths`; this is called again when the scan lands.
+    /// The first paths of a run open the preview when they name one file,
+    /// which is what a file manager sends; a path sent on later, to a window
+    /// that is already open, is a request to play it in the window instead.
+    ///
+    /// The preview does not wait for the scan. It reads its file on its own,
+    /// and a file manager's file is usually outside the music directory
+    /// anyway, so holding it back would leave the full window on screen while
+    /// a large library was read for a track none of it holds.
     pub fn open_pending_paths(&mut self) {
+        if let Some(paths) = &self.pending_paths
+            && let Some(path) = Self::preview_candidate(paths)
+            && self.preview_enabled
+        {
+            let path = path.clone();
+            self.pending_paths = None;
+            self.open_preview(&path);
+            return;
+        }
         if self.scan.is_some() {
             return;
         }
@@ -424,6 +453,92 @@ impl App {
         if let Some(path) = missing {
             self.report_missing(path);
         }
+        self.save_playlists();
+    }
+
+    /// The file a launch should preview, when it named exactly one audio file.
+    ///
+    /// A directory, or a second path, is a session rather than a look at one
+    /// track. Whether the preview is then used is the setting's business, so
+    /// this answers what was asked for rather than what happens.
+    pub fn preview_candidate(paths: &[PathBuf]) -> Option<&PathBuf> {
+        let [path] = paths else {
+            return None;
+        };
+        (path.is_file() && crate::library::has_audio_extension(path)).then_some(path)
+    }
+
+    /// Plays one file in the preview, leaving the playlists alone.
+    ///
+    /// The file is read on its own rather than found in the library, so a
+    /// path anywhere plays: a file manager names files that need not be in
+    /// the music directory. Nothing the user has in a tab is replaced.
+    pub fn open_preview(&mut self, path: &std::path::Path) {
+        let Some(track) = crate::library::read_one(path) else {
+            self.report_missing(path);
+            return;
+        };
+        self.queue = None;
+        self.forget_shuffle();
+        self.play_file(track);
+    }
+
+    /// Plays `track` on its own, outside any playlist.
+    fn play_file(&mut self, track: Track) {
+        let path = track.path.clone();
+        let tagged = track.duration;
+        // The preview is set before the device is opened: which track the
+        // window is showing is not something an audio device decides, and a
+        // host with no sound card still has to draw its art and its name.
+        self.preview = Some(track);
+        self.playing = None;
+        self.length = tagged;
+        self.seek = None;
+        self.peaks.clear();
+
+        if self.audio.is_none() {
+            match Audio::open(self.volume) {
+                Ok(audio) => self.audio = Some(audio),
+                Err(error) => {
+                    self.status = Some(error);
+                    return;
+                }
+            }
+        }
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        match audio.play_file(&path) {
+            Ok(length) => {
+                self.length = length.unwrap_or(tagged);
+                self.waveform = Some(waveform::spawn(path));
+                self.status = None;
+            }
+            Err(error) => self.status = Some(error),
+        }
+    }
+
+    /// Leaves the preview, putting its track into the Default tab.
+    ///
+    /// The window has no way to show a track no playlist holds, so the tab is
+    /// where a previewed track goes when the preview ends. Turning the
+    /// setting off does this too, so the setting and the window never
+    /// disagree. A file the library does not hold cannot go into a playlist,
+    /// which stores paths the next scan has to find again, so it is left out
+    /// and the window shows what it had.
+    pub fn leave_preview(&mut self) {
+        let Some(track) = self.preview.take() else {
+            return;
+        };
+        let Some(index) = self.track_of(&track.path) else {
+            self.status = Some(format!(
+                "{} is outside the music directory",
+                track.path.display()
+            ));
+            return;
+        };
+        self.default_tab().set([index]);
+        self.playing = Some(index);
         self.save_playlists();
     }
 
@@ -711,7 +826,7 @@ impl App {
     /// Starts or pauses playback.
     pub fn toggle(&mut self) {
         match &self.audio {
-            Some(audio) if self.playing.is_some() => audio.toggle(),
+            Some(audio) if self.playing.is_some() || self.preview.is_some() => audio.toggle(),
             _ => {
                 if let Some(&first) = self.visible_tracks().first() {
                     self.play(first);
@@ -982,7 +1097,11 @@ impl App {
     /// names instead of titles, so the popup and the table agree. `None`
     /// when nothing is playing, or the track is no longer in the library.
     pub fn playing_name(&self) -> Option<String> {
-        let track = self.library.tracks.get(self.playing?)?;
+        // The preview's track is in no playlist, so it is named on its own.
+        let track = match &self.preview {
+            Some(track) => track,
+            None => self.library.tracks.get(self.playing?)?,
+        };
         Some(match crate::ui::name_column(self.columns_shown) {
             Some(crate::ui::Column::FileName) => track.file_name(self.file_extension),
             _ => track.title.clone(),
@@ -1125,6 +1244,10 @@ impl App {
     /// to take one from, so its own artwork is used. The two are kept in the
     /// same cache under different keys.
     pub fn playing_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if let Some(preview) = &self.preview {
+            let cover = preview.cover.clone()?;
+            return self.upload_cover(ctx, usize::MAX, &cover);
+        }
         let track = self.playing?;
         if let Some(album) = self.album_of(track) {
             return self.cover_texture(ctx, album);
@@ -1239,6 +1362,20 @@ impl App {
         self.transparency = transparency;
         self.config.transparency = Some(transparency);
         self.save_settings();
+    }
+
+    /// Turns the single-file preview on or off, and remembers it.
+    ///
+    /// Turning it off while the preview is showing leaves it for the window,
+    /// so the setting and what is drawn never disagree: the preview has no
+    /// menu bar to turn it back on from.
+    pub fn set_preview_enabled(&mut self, enabled: bool) {
+        self.preview_enabled = enabled;
+        self.config.preview = Some(enabled);
+        self.save_settings();
+        if !enabled {
+            self.leave_preview();
+        }
     }
 
     /// Keeps the music playing when the window is closed, or stops doing so.
@@ -1474,7 +1611,7 @@ impl App {
             return;
         }
         self.compact = compact;
-        if compact {
+        if compact && self.preview.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 COMPACT_SIZE[0],
                 COMPACT_SIZE[1],
@@ -1531,6 +1668,21 @@ impl App {
     /// drawing pass: a track that ended would never hand over to the next.
     fn advance(&mut self, ctx: &egui::Context) {
         if self.seek.is_some() {
+            return;
+        }
+        // The preview has a track of its own and no playlist behind it, so
+        // it is handled before the playlist walk below, which has nothing to
+        // step to.
+        if self.preview.is_some() {
+            if !self.audio.as_ref().is_some_and(|audio| audio.is_empty()) {
+                ctx.request_repaint_after(Duration::from_millis(20));
+                return;
+            }
+            if self.repeat
+                && let Some(track) = self.preview.take()
+            {
+                self.open_preview(&track.path);
+            }
             return;
         }
         let Some(index) = self.playing else {
@@ -1891,6 +2043,32 @@ fn track_positions(library: &Library) -> HashMap<&Path, usize> {
         .collect()
 }
 
+impl App {
+    /// Plays what was dropped on the window from a file manager.
+    ///
+    /// A dropped file plays the way one named on the command line does, and a
+    /// dropped directory queues its tracks, so a drop can be checked against
+    /// what a launch of the same path does. The paths go through
+    /// [`App::open_paths`] rather than a path of their own for that reason.
+    fn take_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        self.open_paths(&dropped);
+        // A drop that lands nothing to play still has to put its report on
+        // screen, and nothing else in this frame asks for a repaint.
+        ctx.request_repaint();
+    }
+}
+
 impl eframe::App for App {
     /// The colour the renderer clears to.
     ///
@@ -1925,6 +2103,7 @@ impl eframe::App for App {
         // rather than a frame later.
         self.poll_requests(ctx, frame);
         self.poll_mpris(ctx);
+        self.take_dropped_files(ctx);
         self.handle_close(ctx, frame);
         self.advance(ctx);
     }
@@ -1960,6 +2139,12 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
             .show(ui, |ui| {
+                if self.preview.is_some() {
+                    // The preview: the art, its controls and the waveform,
+                    // with no menu bar and no playlist behind it.
+                    self.preview_body(ui);
+                    return;
+                }
                 if self.compact {
                     // The popup: the menu bar across the top, then the art
                     // and its controls, and nothing else.
@@ -2285,6 +2470,173 @@ pub(crate) mod tests {
         assert_eq!(tab.tracks, [2], "and replaces what the tab held");
         // Whether the track then starts is the player's business: it needs an
         // output device and the file itself, neither of which a test has.
+    }
+
+    #[test]
+    fn one_file_and_nothing_else_is_a_preview_candidate() {
+        let directory =
+            std::env::temp_dir().join(format!("blue-dove-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let file = directory.join("song.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+        let other = directory.join("notes.txt");
+        std::fs::write(&other, b"text").expect("the file is written");
+
+        assert_eq!(
+            App::preview_candidate(std::slice::from_ref(&file)),
+            Some(&file)
+        );
+        assert_eq!(
+            App::preview_candidate(&[file.clone(), other.clone()]),
+            None,
+            "two paths are a session, not a preview"
+        );
+        assert_eq!(
+            App::preview_candidate(std::slice::from_ref(&directory)),
+            None,
+            "a directory queues its tracks instead"
+        );
+        assert_eq!(
+            App::preview_candidate(std::slice::from_ref(&other)),
+            None,
+            "a file no decoder handles is not a track"
+        );
+        assert_eq!(App::preview_candidate(&[]), None);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_preview_leaves_the_playlist_alone() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        let queued = app.playlists.current().tracks.clone();
+        let path = app.library.tracks[0].path.clone();
+        app.open_preview(&path);
+
+        assert!(app.preview.is_some(), "the window is showing the preview");
+        assert_eq!(
+            app.playlists.current().tracks,
+            queued,
+            "the playlist is untouched"
+        );
+    }
+
+    #[test]
+    fn leaving_the_preview_puts_its_track_in_the_default_tab() {
+        let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
+        app.playlists.current_mut().set([0]);
+        let path = app.library.tracks[1].path.clone();
+        app.open_preview(&path);
+
+        app.leave_preview();
+        assert!(
+            app.preview.is_none(),
+            "the window is back to its normal layout"
+        );
+        assert_eq!(
+            app.playlists.current().tracks,
+            [1],
+            "the previewed track is kept, in the tab a file goes to"
+        );
+    }
+
+    #[test]
+    fn turning_the_preview_off_leaves_it() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.set_preview_enabled(false);
+
+        assert!(!app.preview_enabled);
+        assert!(
+            app.preview.is_none(),
+            "the window cannot show the preview while the setting is off"
+        );
+    }
+
+    #[test]
+    fn a_launch_naming_one_file_previews_it() {
+        // A file manager sends one file to a launch, and that is the preview.
+        // The file is read on its own, so it need not be in the library: the
+        // library holds the music directory, and a drop can come from
+        // anywhere.
+        let directory = std::env::temp_dir().join(format!("blue-dove-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let file = directory.join("dropped.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+
+        let mut app = app_with(&[("One", &["A"])]);
+        let queued = app.playlists.current().tracks.clone();
+        app.pending_paths = Some(vec![file.clone()]);
+        app.open_pending_paths();
+
+        // The file cannot be decoded, so nothing plays; what the test pins is
+        // that the launch took the preview path rather than the playlist one.
+        assert_eq!(
+            app.playlists.current().tracks,
+            queued,
+            "the playlist is left as it was"
+        );
+        assert!(
+            app.status.is_none()
+                || app
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| !s.contains("music directory")),
+            "the file is not reported as outside the library"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_preview_does_not_wait_for_the_scan() {
+        // A file manager names one file, and the library it belongs to may be
+        // large; the preview has to open at once rather than after the scan,
+        // or the full window sits on screen for as long as it takes.
+        let directory = std::env::temp_dir().join(format!("blue-dove-now-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let file = directory.join("now.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+
+        let mut app = app_with(&[("One", &["A"])]);
+        // A scan in flight is what the app holds while a library is read.
+        let root = std::env::temp_dir();
+        app.scan = Some((crate::library::spawn_scan(root, true), 0));
+        assert!(app.scan.is_some(), "the scan is running");
+
+        app.pending_paths = Some(vec![file.clone()]);
+        app.open_pending_paths();
+
+        assert_eq!(
+            app.preview.as_ref().map(|track| track.path.clone()),
+            Some(file.clone()),
+            "the preview opens while the scan is still running"
+        );
+        assert!(
+            app.pending_paths.is_none(),
+            "and the path is taken, not left to be applied twice"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_previewed_file_outside_the_library_is_read_on_its_own() {
+        // The case a file manager sends: a path the library knows nothing
+        // about. It still has to reach the preview.
+        let directory = std::env::temp_dir().join(format!("blue-dove-out-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let file = directory.join("elsewhere.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+
+        let mut app = app_with(&[("One", &["A"])]);
+        app.open_preview(&file);
+        assert_eq!(
+            app.preview.as_ref().map(|track| track.path.clone()),
+            Some(file.clone()),
+            "the preview holds the file wherever it is"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -341,9 +341,16 @@ Platform notes:
   library scan cannot see them.
 - Every decoder is pure Rust: symphonia through rodio for the common
   formats, and `decode.rs` for the ones symphonia lacks (Monkey's Audio,
-  WavPack, TTA, Musepack, Shorten). Those decode a file whole into
+  WavPack, TTA, Musepack, Shorten, AMR). Those decode a file whole into
   memory. DSD is not supported, and neither are TAK and WMA: the only
   Rust TAK decoder is GPL-3.0, and this app is MIT.
+- AMR comes from `rvoip-codec-core`, which is bit-exact against the 3GPP
+  reference. Its lib is named `codec_core`, not after the package, so the
+  import is `codec_core::..`. Only the `amr` feature is on, so the G.729,
+  Opus and G.711 codecs are not compiled in. The storage format's magic
+  number picks narrowband (8 kHz) from wideband (16 kHz); a comfort-noise,
+  no-data or lost frame carries no mode of its own, so it is decoded in the
+  mode the last speech frame used.
 - `opus.rs` streams instead of decoding up front: it hands rodio one
   packet at a time, so `open` costs a read of the file's tail for the
   length, not a decode of the file. Decoding whole took 789 ms on a
@@ -422,6 +429,27 @@ Platform notes:
   replaces what it held, and appends a directory's tracks to the showing
   playlist. A path that arrives before the scan has finished waits in
   `App::pending_paths` and is applied when the scan lands.
+- A launch naming exactly one audio file opens the **preview**: the art, the
+  line naming the track, and a strip with only repeat, stop and play, with
+  the waveform below and no menu bar. `App::preview_candidate` decides what
+  qualifies (one path, a file, an extension the decoder takes); the setting
+  in **View > Preview a single file**, on by default, decides whether it
+  applies. The file is read by `library::read_one`, not looked up in the
+  library, because a file manager names files that need not be under the
+  music directory; the track lives in `App::preview` and in no playlist, so
+  a preview never replaces what the Default tab holds. Right clicking the
+  art leaves the preview for the window, which puts the track in the Default
+  tab; a file the library does not hold cannot go there, since a save stores
+  paths the next scan has to find again. `advance` handles the preview before
+  the playlist walk, so a track that runs out repeats or stops rather than
+  stepping to a track that is not there. `open_pending_paths` takes the
+  preview path before it looks at the scan: the file is read on its own, so
+  waiting for a library that need not contain it would leave the full window
+  on screen while eight thousand files were read.
+- Files dropped on the window from a file manager go through the same
+  `App::open_paths` a command line path does, so a drop and a launch of the
+  same path behave alike. The drop is read from `raw.dropped_files` in
+  `logic`, which runs even while the window is hidden.
 - `instance.rs` makes a launch find the window that is already running
   instead of opening a second one. It takes an exclusive `try_lock` on a
   file in the runtime directory (the cache directory stands in where that

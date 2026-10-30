@@ -130,8 +130,8 @@ track plays normally.
 The player decodes everything in the crate itself, with pure Rust
 decoders, so nothing has to be installed. FLAC, MP3, M4A and ALAC,
 AAC, Ogg Vorbis, Opus, WAV, AIFF, CAF, Matroska audio, MP1 and MP2 go
-through symphonia. Monkey's Audio, WavPack, TTA, Musepack and Shorten
-have decoders of their own, and so do the formats video game rips use:
+through symphonia. Monkey's Audio, WavPack, TTA, Musepack, Shorten and
+AMR have decoders of their own, and so do the formats video game rips use:
 Sony VAG, CRI ADX, and Nintendo DSP, BRSTM, BCSTM and BFSTM. They all
 get a waveform like every other track.
 
@@ -161,15 +161,26 @@ PlayStation sound formats would each need a whole console emulated.
 `blue-dove --help` lists the flags. Two things are worth knowing beyond the
 list:
 
-`blue-dove /path/to/song.flac` plays that file in a tab named **Default**,
-replacing whatever that tab held. A file the music directory does not
-contain is reported in the status line rather than played. If no music
-directory is set yet, the file's own directory becomes it, so a first run
-can be started from a file.
+`blue-dove /path/to/song.flac` opens the file in the **preview**: a small
+player with the cover, the track's name and its position, a strip with
+repeat, stop and play, and the waveform below. It is the mode a file
+manager launches when you open one audio file from it, and it leaves your
+playlists alone, so a look at one track never replaces what the **Default**
+tab held. A previewed file plays from wherever it is, inside the music
+directory or not. Right-click the cover and choose **Open the Window** to
+leave the preview, which puts the track in the **Default** tab. Turn the
+whole mode off with **View > Preview a single file**.
+
+Naming two or more files, or a directory, opens the full window instead.
 
 `blue-dove /path/to/directory` appends every track under that directory to
 the playlist that is showing, the way a double click on the album list
 does.
+
+Dropping a file or a directory on the window does what naming it on the
+command line does: a directory appends its tracks, and files play. A drop
+arrives at a window that is already open, so it never shrinks it into the
+preview.
 
 `--play`, `--pause`, `--play-pause`, `--stop`, `--next` and `--previous`
 go to the player that is already running, so they work from a script, a

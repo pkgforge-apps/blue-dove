@@ -573,6 +573,17 @@ impl App {
                     )
                     .on_hover_text("Leaves out files and directories whose name starts with a dot");
 
+                    self.setting_checkbox(
+                        ui,
+                        "Preview a single file",
+                        self.preview_enabled,
+                        Self::set_preview_enabled,
+                    )
+                    .on_hover_text(
+                        "Opens a launch naming one audio file as a small player \
+                         that leaves the playlists untouched",
+                    );
+
                     ui.separator();
                     ui.menu_button("Theme", |ui| {
                         for theme in theme::Theme::ALL {
@@ -679,6 +690,14 @@ impl App {
                     self.set_cover_fit(true);
                     ui.close();
                 }
+                // The preview has no menu bar, so the way out of it is here.
+                if self.preview.is_some() {
+                    ui.separator();
+                    if ui.button("Open the Window").clicked() {
+                        self.leave_preview();
+                        ui.close();
+                    }
+                }
             });
         });
 
@@ -704,7 +723,7 @@ impl App {
                 .max_rect(strip.shrink2(vec2(8.0, 0.0)))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        self.controls(&mut controls);
+        self.controls(&mut controls, self.preview.is_none());
     }
 
     /// The playing track's name and its position, in the popup's line
@@ -748,8 +767,11 @@ impl App {
     /// order.
     ///
     /// The mode buttons take their room from the volume slider, which fills
-    /// whatever is left of the strip.
-    fn controls(&mut self, ui: &mut egui::Ui) {
+    /// whatever is left of the strip. `whole` is off in the preview, where
+    /// there is no playlist to step through and no order to walk: only
+    /// repeat, stop and play are drawn, and the volume takes the room the
+    /// two missing buttons leave.
+    fn controls(&mut self, ui: &mut egui::Ui, whole: bool) {
         // Tighter than the style's default, so the buttons and the slider
         // both fit the width the album art sets.
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -762,7 +784,7 @@ impl App {
         repeat.on_hover_text("Repeat Track");
 
         let playing = self.playing.is_some();
-        if transport(ui, Icon::Previous, playing).clicked() {
+        if whole && transport(ui, Icon::Previous, playing).clicked() {
             self.step(false);
         }
         if transport(ui, Icon::Stop, playing).clicked() {
@@ -776,15 +798,17 @@ impl App {
         if transport(ui, icon, true).clicked() {
             self.toggle();
         }
-        if transport(ui, Icon::Next, playing).clicked() {
+        if whole && transport(ui, Icon::Next, playing).clicked() {
             self.step(true);
         }
 
-        let random = toggle(ui, Icon::Random, self.random, accent);
-        if random.clicked() {
-            self.set_random(!self.random);
+        if whole {
+            let random = toggle(ui, Icon::Random, self.random, accent);
+            if random.clicked() {
+                self.set_random(!self.random);
+            }
+            random.on_hover_text("Random Order");
         }
-        random.on_hover_text("Random Order");
 
         self.volume_slider(ui);
     }
@@ -1308,6 +1332,17 @@ impl App {
     /// whatever else is on screen. The art is square and takes the width it
     /// is given, or less when the window is short.
     pub(crate) fn compact_body(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(ART_MARGIN);
+        self.now_playing(ui, true);
+    }
+
+    /// The preview: the art, its controls and the waveform, and nothing else.
+    ///
+    /// It is the popup without a menu bar, used when one audio file was named
+    /// on the command line. There is no playlist behind it, so there is no
+    /// Previous, no Next and no Random Order: the strip carries repeat, stop
+    /// and play, and the waveform below seeks within the one track.
+    pub(crate) fn preview_body(&mut self, ui: &mut egui::Ui) {
         ui.add_space(ART_MARGIN);
         self.now_playing(ui, true);
     }
