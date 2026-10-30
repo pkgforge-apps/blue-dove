@@ -1,4 +1,19 @@
 
+## [0.1.5](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.4...v0.1.5) - 2026-10-30
+
+### Features
+
+- *(decode)* Play AMR call recordings - ([b96ff8c](https://github.com/pkgforge-apps/blue-dove/commit/b96ff8c7ad792d5c14fb5b706ba31ad94cb84339))
+- *(ui)* Preview a single file from the command line or a drop - ([8bdce35](https://github.com/pkgforge-apps/blue-dove/commit/8bdce3542dff21db7b36db8bc8b2852a20d34285))
+
+### Bug Fixes
+
+- *(ui)* Floor the popup at the size it picked - ([6ace491](https://github.com/pkgforge-apps/blue-dove/commit/6ace491dd88d744421aef40eeb2808eb1f61f956))
+- *(ui)* Size the popup to its art and let it resize - ([74b5d56](https://github.com/pkgforge-apps/blue-dove/commit/74b5d568fbb031ca230103ce0b800728d5847792))
+- *(ui)* Pin the preview window to one size - ([d19241f](https://github.com/pkgforge-apps/blue-dove/commit/d19241fd5b9c6bef4a158370edd9ec7131b4ba05))
+- *(ui)* Preview a file opened while the player runs - ([335ceaf](https://github.com/pkgforge-apps/blue-dove/commit/335ceafca35e99864ad950d9ff5d095a06950baf))
+- *(ui)* Resize the preview and drop the empty art box - ([6137d97](https://github.com/pkgforge-apps/blue-dove/commit/6137d97fa1a70d8a992b4f1842aa7a249747d6f2))
+
 ## [0.1.4](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.3...v0.1.4) - 2026-10-29
 
 ### Features
