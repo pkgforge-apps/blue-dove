@@ -1248,4 +1248,103 @@ mod tests {
             assert!(!is_disc_directory(Path::new(name)), "{name} is not a disc");
         }
     }
+
+    /// The mimetypes shared-mime-info gives each extension the player reads.
+    ///
+    /// An empty list is an extension no desktop knows: the game rip formats,
+    /// CAF and MP1. MP4 is left out too, since its mimetype also names the
+    /// video files the player does not open.
+    const MIMETYPES: &[(&str, &[&str])] = &[
+        ("aac", &["audio/aac"]),
+        ("adx", &[]),
+        ("aif", &["audio/x-aiff"]),
+        ("aiff", &["audio/x-aiff"]),
+        ("amr", &["audio/AMR"]),
+        ("ape", &["audio/x-ape"]),
+        ("bcstm", &[]),
+        ("bfstm", &[]),
+        ("brstm", &[]),
+        ("caf", &[]),
+        ("dsp", &["audio/x-dsp"]),
+        ("flac", &["audio/flac"]),
+        ("m4a", &["audio/mp4"]),
+        ("m4b", &["audio/x-m4b"]),
+        ("mka", &["audio/matroska"]),
+        ("mp+", &["audio/x-musepack"]),
+        ("mp1", &[]),
+        ("mp2", &["audio/mp2"]),
+        ("mp3", &["audio/mpeg"]),
+        ("mp4", &[]),
+        ("mpc", &["audio/x-musepack"]),
+        ("mpp", &["audio/x-musepack"]),
+        ("oga", OGG),
+        ("ogg", OGG),
+        ("opus", &["audio/ogg", "audio/x-opus+ogg"]),
+        ("shn", &["application/x-shorten"]),
+        ("swag", &[]),
+        ("tta", &["audio/x-tta"]),
+        ("vag", &[]),
+        ("vig", &[]),
+        ("wav", &["audio/vnd.wave"]),
+        ("wv", &["audio/x-wavpack"]),
+    ];
+
+    /// What an Ogg file may hold: Vorbis, FLAC or Speex, in a stream an
+    /// older database calls `audio/x-vorbis+ogg` and a newer one
+    /// `audio/vorbis`.
+    const OGG: &[&str] = &[
+        "audio/ogg",
+        "audio/vorbis",
+        "audio/x-vorbis+ogg",
+        "audio/x-flac+ogg",
+        "audio/x-speex+ogg",
+    ];
+
+    /// A file manager offers the player for every format it reads, and the
+    /// desktop entry claims no mimetype the player cannot open.
+    #[test]
+    fn the_desktop_entry_claims_the_formats_the_player_reads() {
+        let entry = include_str!("../packaging/linux/app.desktop");
+        let line = entry
+            .lines()
+            .find_map(|line| line.strip_prefix("MimeType="))
+            .expect("the desktop entry names the mimetypes it opens");
+        let claimed: Vec<&str> = line.split(';').filter(|mime| !mime.is_empty()).collect();
+
+        let mut listed: Vec<&str> = MIMETYPES.iter().map(|(extension, _)| *extension).collect();
+        listed.sort_unstable();
+        let mut read = AUDIO_EXTENSIONS.to_vec();
+        read.sort_unstable();
+        assert_eq!(listed, read, "every format the player reads belongs here");
+
+        for (extension, mimetypes) in MIMETYPES {
+            for mimetype in *mimetypes {
+                assert!(
+                    claimed.contains(mimetype),
+                    "{extension} opens as {mimetype}, which the entry leaves out"
+                );
+            }
+        }
+        for mimetype in &claimed {
+            assert!(
+                MIMETYPES.iter().any(|(_, known)| known.contains(mimetype)),
+                "{mimetype} is claimed but no format the player reads has it"
+            );
+        }
+    }
+
+    /// The entry hands the player the file that was opened, so a file manager
+    /// that launches it plays that file rather than showing an empty window.
+    #[test]
+    fn the_desktop_entry_passes_the_opened_file() {
+        let entry = include_str!("../packaging/linux/app.desktop");
+        let exec = entry
+            .lines()
+            .find_map(|line| line.strip_prefix("Exec="))
+            .expect("the desktop entry names the command that runs");
+        assert!(
+            exec.contains("%F"),
+            "Exec={exec} names no file, so a file manager opens an empty player"
+        );
+    }
 }
