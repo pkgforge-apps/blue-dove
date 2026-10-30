@@ -446,15 +446,19 @@ Platform notes:
   preview path before it looks at the scan: the file is read on its own, so
   waiting for a library that need not contain it would leave the full window
   on screen while eight thousand files were read.
-- The preview is a resizable window of its own, not the fixed-size popup:
-  it opens at `COMPACT_SIZE` when the file carries art and at the shorter
-  `PREVIEW_NO_ART_SIZE` when it does not, and its floor is `PREVIEW_MIN_SIZE`,
-  below the compact popup's. `leave_preview` puts the full window's floor and
-  size back, since a window left at the preview's floor would open onto a
-  squeezed popup. A track with no cover draws no square at all: an empty box
-  the size of a cover would be the largest thing in the window and say
-  nothing. The menu a right click on the art gives, which is also the way out
-  of the preview, is offered on the name line when there is no art.
+- The preview is a **fixed-size** window: `App::pin_window` sets its minimum
+  and its maximum to the same size and sends `Resizable(false)`, so a drag on
+  a border and a window manager honouring size hints both refuse. The size is
+  `COMPACT_SIZE` when the file carries art and the shorter
+  `PREVIEW_NO_ART_SIZE` when it does not; the answer is kept in
+  `App::preview_art`, read from the file when the preview opens, so the
+  layout inside a window that cannot shrink cannot change either.
+  `exit_preview` lifts the pin before the full layout lands: the regular and
+  compact layouts stay resizable, and a window left pinned would stay fixed
+  for the rest of the run. A track with no cover draws no square at all: an
+  empty box the size of a cover would be the largest thing in the window and
+  say nothing. The menu a right click on the art gives, which is also the way
+  out of the preview, is offered on the name line when there is no art.
 - A file opened through `instance::Request::Open`, which is what a file
   manager sends when the player is already running, previews exactly like a
   fresh launch: the two paths meet in `App::take_request`. Anything else

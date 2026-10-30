@@ -637,7 +637,11 @@ impl App {
         // A track with no art gets no square at all: an empty box the size of
         // a cover is the largest thing in the window and says nothing. What
         // the player draws then is the name, the controls and the waveform.
-        if texture.is_none() {
+        // The preview's window is a fixed size chosen when it opened, so it
+        // is `preview_art` that decides, not whatever texture arrives now: a
+        // cover that failed to load would otherwise collapse the layout inside
+        // a window that cannot shrink to match.
+        if texture.is_none() || (self.preview.is_some() && !self.preview_art) {
             self.name_and_controls(ui, compact);
             return;
         }

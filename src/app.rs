@@ -59,13 +59,6 @@ pub const COMPACT_BREAK: [f32; 2] = [560.0, 430.0];
 /// naming the track, the controls and the waveform.
 pub const PREVIEW_NO_ART_SIZE: [f32; 2] = [320.0, 92.0];
 
-/// The smallest the preview window may be made, in points.
-///
-/// The preview is a window of its own rather than a fixed-size popup, so it
-/// has to be resizable; the floor is low enough for the shortest layout, the
-/// one with no art.
-pub const PREVIEW_MIN_SIZE: [f32; 2] = [180.0, 72.0];
-
 /// The size the full window opens at, in points.
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1180.0, 760.0];
 
@@ -259,6 +252,13 @@ pub struct App {
     /// than taken from the library, so a file anywhere plays: a file manager
     /// hands over paths that need not be under the music directory.
     pub(crate) preview: Option<Track>,
+    /// Whether the previewed file carried art, which sets the window's height.
+    ///
+    /// A file with no cover draws no square, so its window is only as tall as
+    /// the name line, the controls and the waveform. The answer comes from the
+    /// file read when the preview opens and is kept from then on: the window
+    /// is a fixed size, so the layout and the size must not disagree.
+    pub(crate) preview_art: bool,
     /// Whether the user asked to quit, which a window closing is not.
     pub(crate) quitting: bool,
 }
@@ -358,6 +358,7 @@ impl App {
             cover_fit,
             preview_enabled,
             preview: None,
+            preview_art: false,
             quitting: false,
         };
         match app.config.music_directory.clone() {
@@ -495,10 +496,14 @@ impl App {
     /// path anywhere plays: a file manager names files that need not be in
     /// the music directory. Nothing the user has in a tab is replaced.
     ///
-    /// The window is given the size the file needs: art makes it square and
-    /// tall, and a file with none is only as tall as its name, its controls
-    /// and the waveform. The floor is lowered to the preview's own minimum,
-    /// since the compact popup's floor is as large as this window.
+    /// The preview is a fixed-size window: the size is set here and the
+    /// window is made unresizable, so it can be neither dragged bigger nor
+    /// shrunk. The regular and compact layouts stay resizable; only the
+    /// preview is pinned.
+    ///
+    /// The size is the one the file needs: art makes it square and tall, and
+    /// a file with none is only as tall as its name, its controls and the
+    /// waveform.
     pub fn open_preview(&mut self, ctx: &egui::Context, path: &std::path::Path) {
         let Some(track) = crate::library::read_one(path) else {
             self.report_missing(path);
@@ -506,19 +511,32 @@ impl App {
         };
         self.queue = None;
         self.forget_shuffle();
-        let size = if track.cover.is_some() {
+        self.preview_art = track.cover.is_some();
+        self.play_file(track);
+        self.pin_window(ctx);
+    }
+
+    /// Gives the preview window its fixed size and stops it being resized.
+    ///
+    /// The minimum and the exact size are both set, so a window manager that
+    /// honours size hints cannot stretch it either; `Resizable(false)` is what
+    /// removes the handles and the drag on a border.
+    fn pin_window(&self, ctx: &egui::Context) {
+        let size = if self.preview_art {
             COMPACT_SIZE
         } else {
             PREVIEW_NO_ART_SIZE
         };
-        self.play_file(track);
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-            PREVIEW_MIN_SIZE[0],
-            PREVIEW_MIN_SIZE[1],
+            size[0], size[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(
+            size[0], size[1],
         )));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
             size[0], size[1],
         )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
     }
 
     /// Plays `track` on its own, outside any playlist.
@@ -565,6 +583,14 @@ impl App {
     /// it can; `None` means nothing was being previewed.
     fn exit_preview(&mut self, ctx: &egui::Context) -> Option<Track> {
         let track = self.preview.take()?;
+        // The pin comes off in the same breath: the regular and compact
+        // layouts are resizable, and a window left pinned would stay fixed
+        // for the rest of the run.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(
+            f32::INFINITY,
+            f32::INFINITY,
+        )));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
             COMPACT_SIZE[0],
             COMPACT_SIZE[1],
@@ -2749,6 +2775,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_preview_is_a_fixed_size_and_the_rest_is_not() {
+        // The preview is pinned: its size is the floor and the ceiling at
+        // once, so neither a drag on a border nor a window manager honouring
+        // size hints can change it. Leaving the preview lifts the pin, since
+        // the regular and compact layouts are resizable.
+        let mut app = app_with(&[("One", &["A"])]);
+        let path = app.library.tracks[0].path.clone();
+
+        app.open_preview(&egui::Context::default(), &path);
+        assert!(app.preview.is_some(), "the preview is showing");
+        assert!(
+            !app.preview_art,
+            "this track carries no art, so its window is the short one"
+        );
+
+        app.leave_preview(&egui::Context::default());
+        assert!(app.preview.is_none(), "the preview is gone");
+    }
+
+    #[test]
     fn a_preview_without_art_asks_for_a_shorter_window_than_one_with_it() {
         // Without art there is no square to draw, so the window is only as
         // tall as the name line, the controls and the waveform. The two sizes
@@ -2756,8 +2802,7 @@ pub(crate) mod tests {
         // background where the art would have been.
         const { assert!(PREVIEW_NO_ART_SIZE[1] < COMPACT_SIZE[1]) };
         const { assert!(PREVIEW_NO_ART_SIZE[0] <= COMPACT_SIZE[0]) };
-        const { assert!(PREVIEW_MIN_SIZE[0] < COMPACT_SIZE[0]) };
-        const { assert!(PREVIEW_MIN_SIZE[1] < COMPACT_SIZE[1]) };
+        const { assert!(PREVIEW_NO_ART_SIZE[0] == COMPACT_SIZE[0]) };
     }
 
     #[test]

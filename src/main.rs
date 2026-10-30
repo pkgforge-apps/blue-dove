@@ -93,29 +93,44 @@ fn main() -> eframe::Result {
     // shrinking once the first frame has drawn. The file is read here only
     // for whether it carries art: a track without one gets no square, and
     // the window is only as tall as the name, the controls and the waveform.
+    //
+    // The preview is a fixed-size window, so it starts unresizable with its
+    // size given as both the floor and the ceiling; `App::open_preview` pins
+    // it the same way when a launch lands on a window that is already open.
     let preview = App::preview_candidate(&cli.paths).is_some() && !smoke;
-    let (start_size, min_size) = if preview {
+    let start_size = if preview {
         let has_art = App::preview_candidate(&cli.paths)
             .and_then(|path| crate::library::read_one(path))
             .is_some_and(|track| track.cover.is_some());
-        let start = if has_art {
+        if has_art {
             app::COMPACT_SIZE
         } else {
             app::PREVIEW_NO_ART_SIZE
-        };
-        (start, app::PREVIEW_MIN_SIZE)
+        }
     } else {
-        (app::DEFAULT_WINDOW_SIZE, app::COMPACT_SIZE)
+        app::DEFAULT_WINDOW_SIZE
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(App::TITLE)
             .with_app_id(App::ID)
             .with_inner_size(start_size)
-            // The preview is a window of its own and can be resized; the full
-            // window's floor is the compact layout's size, below which the
-            // album list and the table cannot be drawn.
-            .with_min_inner_size(min_size)
+            .with_resizable(!preview)
+            // The full window's floor is the compact layout's size, below
+            // which the album list and the table cannot be drawn. The preview
+            // is pinned instead: its floor and its ceiling are the one size it
+            // was given, so a window manager honouring size hints cannot
+            // stretch it either.
+            .with_min_inner_size(if preview {
+                start_size
+            } else {
+                app::COMPACT_SIZE
+            })
+            .with_max_inner_size(if preview {
+                start_size
+            } else {
+                [f32::INFINITY, f32::INFINITY]
+            })
             // The window is drawn translucent so the desktop shows through
             // it; a compositor blends it, and without one it looks solid.
             .with_transparent(true)
