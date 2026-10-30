@@ -455,6 +455,11 @@ Platform notes:
   the size of a cover would be the largest thing in the window and say
   nothing. The menu a right click on the art gives, which is also the way out
   of the preview, is offered on the name line when there is no art.
+- A file opened through `instance::Request::Open`, which is what a file
+  manager sends when the player is already running, previews exactly like a
+  fresh launch: the two paths meet in `App::take_request`. Anything else
+  arriving that way is a session, so `open_paths` calls `exit_preview` first
+  and the window gets its floor and its size back before the content lands.
 - Files dropped on the window from a file manager go through the same
   `App::open_paths` a command line path does, so a drop and a launch of the
   same path behave alike. The drop is read from `raw.dropped_files` in

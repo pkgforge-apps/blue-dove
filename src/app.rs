@@ -422,7 +422,7 @@ impl App {
             return;
         }
         if let Some(paths) = self.pending_paths.take() {
-            self.open_paths(&paths);
+            self.open_paths(ctx, &paths);
         }
     }
 
@@ -433,7 +433,12 @@ impl App {
     /// the playlist that is showing, the way a double click on the album list
     /// does. A path the library does not hold is reported rather than
     /// silently ignored.
-    pub fn open_paths(&mut self, paths: &[PathBuf]) {
+    ///
+    /// This is the full window's path, so a preview that is showing gives way
+    /// first: what arrives here is a session rather than a look at one track,
+    /// and the small window with its three buttons cannot show it.
+    pub fn open_paths(&mut self, ctx: &egui::Context, paths: &[PathBuf]) {
+        self.exit_preview(ctx);
         // What a path is comes from the library rather than the file system:
         // a file the library holds is a file, a path with tracks under it is a
         // directory, and anything else is reported.
@@ -551,6 +556,26 @@ impl App {
         }
     }
 
+    /// Drops the preview and gives the window the full layout's size back.
+    ///
+    /// The window goes back to the full layout's floor and its own size: the
+    /// preview's floor is far below what the album list and the table need,
+    /// and a window left that small would open onto a squeezed popup. The
+    /// previewed track is handed back, so a caller that has somewhere to put
+    /// it can; `None` means nothing was being previewed.
+    fn exit_preview(&mut self, ctx: &egui::Context) -> Option<Track> {
+        let track = self.preview.take()?;
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            COMPACT_SIZE[0],
+            COMPACT_SIZE[1],
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            DEFAULT_WINDOW_SIZE[0],
+            DEFAULT_WINDOW_SIZE[1],
+        )));
+        Some(track)
+    }
+
     /// Leaves the preview, putting its track into the Default tab.
     ///
     /// The window has no way to show a track no playlist holds, so the tab is
@@ -560,21 +585,9 @@ impl App {
     /// which stores paths the next scan has to find again, so it is left out
     /// and the window shows what it had.
     pub fn leave_preview(&mut self, ctx: &egui::Context) {
-        let Some(track) = self.preview.take() else {
+        let Some(track) = self.exit_preview(ctx) else {
             return;
         };
-        // The window goes back to the full layout's floor and its own size:
-        // the preview's floor is far below what the album list and the table
-        // need, and a window left that small would open onto a squeezed
-        // popup.
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-            COMPACT_SIZE[0],
-            COMPACT_SIZE[1],
-        )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-            DEFAULT_WINDOW_SIZE[0],
-            DEFAULT_WINDOW_SIZE[1],
-        )));
         let Some(index) = self.track_of(&track.path) else {
             self.status = Some(format!(
                 "{} is outside the music directory",
@@ -1783,18 +1796,7 @@ impl App {
         }
         let mut raise = false;
         for request in requests {
-            match request {
-                crate::instance::Request::Show => raise = true,
-                // A command is carried out where it lands: a media key from a
-                // script should not pull the window up in front of the user.
-                crate::instance::Request::Action(action) => {
-                    self.apply(action.command(), ctx);
-                }
-                crate::instance::Request::Open(paths) => {
-                    raise = true;
-                    self.open_paths(&paths);
-                }
-            }
+            raise |= self.take_request(ctx, request);
         }
         // The request was carried out after this frame's state was published,
         // and a stop leaves nothing that asks for another frame, so the
@@ -1802,6 +1804,35 @@ impl App {
         ctx.request_repaint();
         if raise {
             self.raise_window(ctx, frame);
+        }
+    }
+
+    /// Carries out one request from another launch.
+    ///
+    /// Answers whether the window should be brought forward: an open asks to
+    /// be seen, and a transport command does not, since a media key from a
+    /// script should not pull the window up in front of the user.
+    fn take_request(&mut self, ctx: &egui::Context, request: crate::instance::Request) -> bool {
+        match request {
+            crate::instance::Request::Show => true,
+            crate::instance::Request::Action(action) => {
+                self.apply(action.command(), ctx);
+                false
+            }
+            crate::instance::Request::Open(paths) => {
+                // A launch naming one file is a preview, whether it started
+                // the window or found this one running: a file manager sends
+                // the same request either way, and the second file opened
+                // while the player runs has to behave like the first.
+                match Self::preview_candidate(&paths) {
+                    Some(path) if self.preview_enabled => {
+                        let path = path.clone();
+                        self.open_preview(ctx, &path);
+                    }
+                    _ => self.open_paths(ctx, &paths),
+                }
+                true
+            }
         }
     }
 
@@ -2107,7 +2138,7 @@ impl App {
         if dropped.is_empty() {
             return;
         }
-        self.open_paths(&dropped);
+        self.open_paths(ctx, &dropped);
         // A drop that lands nothing to play still has to put its report on
         // screen, and nothing else in this frame asks for a repaint.
         ctx.request_repaint();
@@ -2508,7 +2539,7 @@ pub(crate) mod tests {
         // The playlist holds album One; naming one of album Two's files
         // should replace it rather than add to it.
         let wanted = PathBuf::from("/music/Two/C.flac");
-        app.open_paths(std::slice::from_ref(&wanted));
+        app.open_paths(&egui::Context::default(), std::slice::from_ref(&wanted));
 
         let tab = app.playlists.current();
         assert_eq!(tab.name, "Default", "the file plays in the Default tab");
@@ -2633,6 +2664,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_opened_while_the_player_runs_still_previews() {
+        // A file manager hands the file to the window that is already open
+        // when one is, and that arrives as a request rather than a launch.
+        // It has to preview like a fresh launch does, or opening a second
+        // file puts the full window on screen instead.
+        let directory = std::env::temp_dir().join(format!("blue-dove-open-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("the directory is made");
+        let file = directory.join("second.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+
+        let mut app = app_with(&[("One", &["A"])]);
+        let queued = app.playlists.current().tracks.clone();
+        app.take_request(
+            &egui::Context::default(),
+            crate::instance::Request::Open(vec![file.clone()]),
+        );
+
+        assert_eq!(
+            app.preview.as_ref().map(|track| track.path.clone()),
+            Some(file.clone()),
+            "the second file opens in the preview"
+        );
+        assert_eq!(
+            app.playlists.current().tracks,
+            queued,
+            "and the playlist is still untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_directory_opened_while_previewing_leaves_the_preview() {
+        // The preview has three buttons and no playlist, so content that is a
+        // session rather than one track has to give it back to the full
+        // window.
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        let path = app.library.tracks[0].path.clone();
+        app.open_preview(&egui::Context::default(), &path);
+        assert!(app.preview.is_some(), "the preview is showing");
+
+        app.take_request(
+            &egui::Context::default(),
+            crate::instance::Request::Open(vec![PathBuf::from("/music/One")]),
+        );
+
+        assert!(
+            app.preview.is_none(),
+            "the directory takes the full window back"
+        );
+    }
+
+    #[test]
     fn the_preview_does_not_wait_for_the_scan() {
         // A file manager names one file, and the library it belongs to may be
         // large; the preview has to open at once rather than after the scan,
@@ -2700,7 +2784,7 @@ pub(crate) mod tests {
     fn a_directory_from_the_command_line_queues_what_it_holds() {
         let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
         app.playlists.current_mut().set([0]);
-        app.open_paths(&[PathBuf::from("/music/Two")]);
+        app.open_paths(&egui::Context::default(), &[PathBuf::from("/music/Two")]);
 
         assert_eq!(
             app.playlists.current().tracks,
@@ -2712,7 +2796,10 @@ pub(crate) mod tests {
     #[test]
     fn a_path_the_library_does_not_hold_is_reported() {
         let mut app = app_with(&[("One", &["A"])]);
-        app.open_paths(&[PathBuf::from("/elsewhere/not-here.flac")]);
+        app.open_paths(
+            &egui::Context::default(),
+            &[PathBuf::from("/elsewhere/not-here.flac")],
+        );
 
         assert_eq!(
             app.status.as_deref(),
@@ -2725,7 +2812,10 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A"])]);
         app.playlists.current_mut().name = "Evening".to_string();
 
-        app.open_paths(&[PathBuf::from("/music/One/A.flac")]);
+        app.open_paths(
+            &egui::Context::default(),
+            &[PathBuf::from("/music/One/A.flac")],
+        );
 
         assert_eq!(app.playlists.items.len(), 2, "a tab is opened for it");
         assert_eq!(app.playlists.current().name, "Default");
