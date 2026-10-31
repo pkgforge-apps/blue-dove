@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::abx::{Abx, Choice, Side};
 use crate::config::{Config, SavedPlaylist};
 use crate::dialog;
 use crate::library::{Library, ScanMessage, Track};
@@ -277,6 +278,23 @@ pub struct App {
     pub(crate) preview_art: bool,
     /// Whether the user asked to quit, which a window closing is not.
     pub(crate) quitting: bool,
+    /// The blind comparison under way, when there is one.
+    ///
+    /// It is kept out of the playlists and the table: a highlighted row would
+    /// say which of the two tracks X is, and the test would score a listener
+    /// who read the answer off the window.
+    pub(crate) abx: Option<Abx>,
+    /// The sums of the two tracks under test, while they are being read.
+    pub(crate) abx_reading: Option<Receiver<crate::digest::Sums>>,
+    /// The two sums, A first, once both are read.
+    pub(crate) abx_sums: Option<(String, String)>,
+    /// The moment every choice is played from.
+    ///
+    /// Two encodes of one song are compared at the point the listener cares
+    /// about, not at whatever the intro happens to be, so every play starts
+    /// here rather than at the beginning. It outlives one test, since a
+    /// listener sets it once and runs the same moment against several pairs.
+    pub(crate) abx_start: Duration,
 }
 
 impl App {
@@ -379,6 +397,10 @@ impl App {
             preview: None,
             preview_art: false,
             quitting: false,
+            abx: None,
+            abx_reading: None,
+            abx_sums: None,
+            abx_start: Duration::ZERO,
         };
         match app.config.music_directory.clone() {
             Some(directory) => {
@@ -560,6 +582,9 @@ impl App {
 
     /// Plays `track` on its own, outside any playlist.
     fn play_file(&mut self, track: Track) {
+        // The preview takes the window and the device, so a blind test ends
+        // with it.
+        self.abx = None;
         let path = track.path.clone();
         let tagged = track.duration;
         // The preview is set before the device is opened: which track the
@@ -772,6 +797,18 @@ impl App {
             self.waveform = None;
         }
 
+        if let Some(receiver) = &self.abx_reading
+            && let Ok((a, b)) = receiver.try_recv()
+        {
+            self.abx_reading = None;
+            // A file that cannot be read leaves the sum out rather than
+            // stopping the test: the comparison still runs without it.
+            if let (Ok(a), Ok(b)) = (a, b) {
+                self.abx_sums = Some((a, b));
+            }
+            ctx.request_repaint();
+        }
+
         if let Some(receiver) = &self.picker
             && let Ok(chosen) = receiver.try_recv()
         {
@@ -797,6 +834,9 @@ impl App {
     /// A track that cannot be opened, or an index the library does not hold,
     /// leaves the error in the status line and nothing playing.
     pub fn play(&mut self, index: usize) {
+        // Playing a row by hand ends a blind test: the two would fight over
+        // the device, and the row would say which track X is.
+        self.abx = None;
         let Some(track) = self.library.tracks.get(index) else {
             return;
         };
@@ -928,8 +968,9 @@ impl App {
 
     /// Starts or pauses playback.
     pub fn toggle(&mut self) {
+        let loaded = self.playing.is_some() || self.preview.is_some() || self.abx.is_some();
         match &self.audio {
-            Some(audio) if self.playing.is_some() || self.preview.is_some() => audio.toggle(),
+            Some(audio) if loaded => audio.toggle(),
             _ => {
                 if let Some(&first) = self.visible_tracks().first() {
                     self.play(first);
@@ -1184,6 +1225,140 @@ impl App {
         self.peaks.clear();
         self.wave_columns = None;
         self.waveform = None;
+    }
+
+    /// Starts a blind comparison of the two selected tracks.
+    ///
+    /// The first of the two rows is A and the second B. The test takes the
+    /// player over from the playlist, which stops: the table highlights the
+    /// playing row, and a highlight would say which of the two X is. A
+    /// selection that is not exactly two rows starts nothing.
+    pub fn start_abx(&mut self) {
+        let tracks = self.selected_tracks();
+        let [a, b] = tracks.as_slice() else {
+            return;
+        };
+        let (Some(a), Some(b)) = (self.library.tracks.get(*a), self.library.tracks.get(*b)) else {
+            return;
+        };
+        let (a, b) = (a.clone(), b.clone());
+        self.stop();
+        self.abx_reading = Some(crate::digest::spawn(a.path.clone(), b.path.clone()));
+        self.abx_sums = None;
+        self.abx = Some(Abx::new(a, b, self.abx_seed()));
+    }
+
+    /// A seed for the next test, drawn so that two runs differ.
+    ///
+    /// The counter alone would hand a restart of the same pair the sides the
+    /// run before it drew, a moment later, which is the one thing a blind
+    /// test must not do; the clock is mixed in to keep them apart.
+    fn abx_seed(&mut self) -> u64 {
+        self.random_state = self
+            .random_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let clock = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        self.random_state ^ u64::from(clock)
+    }
+
+    /// Plays the track a choice names, for a listener comparing the two.
+    ///
+    /// It starts at `abx_start` rather than at the beginning, so every choice
+    /// is heard from the same moment. The device opens on the first press, as
+    /// it does for a track played from the table, so a host without a sound
+    /// card still opens the test and says why nothing plays.
+    pub fn abx_play(&mut self, choice: Choice) {
+        let Some(test) = &self.abx else {
+            return;
+        };
+        let path = test.path(choice);
+        let tagged = test.choice(choice).duration;
+        if self.audio.is_none() {
+            match Audio::open(self.volume) {
+                Ok(audio) => self.audio = Some(audio),
+                Err(error) => {
+                    self.status = Some(error);
+                    return;
+                }
+            }
+        }
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        let length = match audio.play_file(&path) {
+            Ok(length) => length,
+            Err(error) => {
+                self.status = Some(error);
+                return;
+            }
+        };
+        let start = self.abx_start;
+        if !start.is_zero()
+            && let Err(error) = audio.seek(start)
+        {
+            self.status = Some(error);
+        }
+        self.length = length.unwrap_or(tagged);
+        self.seek = None;
+        self.status = None;
+        if let Some(test) = &mut self.abx {
+            test.set_playing(Some(choice));
+        }
+    }
+
+    /// Moves the track under the comparison's seek bar to `position`.
+    pub fn abx_seek(&mut self, position: Duration) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if let Err(error) = audio.seek(position) {
+            self.status = Some(error);
+        }
+    }
+
+    /// Sets the moment every choice is played from.
+    pub fn abx_set_start(&mut self, start: Duration) {
+        self.abx_start = start;
+    }
+
+    /// Scores the trial under way against `side`.
+    ///
+    /// A second answer to the same trial, or one given after the last, is
+    /// ignored by the test, which counts each trial once.
+    pub fn abx_answer(&mut self, side: Side) {
+        if let Some(test) = &mut self.abx {
+            let _ = test.answer(side);
+        }
+    }
+
+    /// Moves the test on to the trial after the one answered.
+    pub fn abx_next(&mut self) {
+        if let Some(test) = &mut self.abx {
+            test.next();
+        }
+    }
+
+    /// Runs the comparison again with the same two tracks.
+    pub fn abx_restart(&mut self) {
+        if self.abx.is_none() {
+            return;
+        }
+        let seed = self.abx_seed();
+        if let Some(test) = &mut self.abx {
+            test.restart(seed);
+        }
+    }
+
+    /// Ends the comparison, stopping whatever it was playing.
+    pub fn close_abx(&mut self) {
+        if self.abx.take().is_some() {
+            self.stop();
+        }
+        self.abx_reading = None;
+        self.abx_sums = None;
     }
 
     /// The album a track belongs to.
@@ -1804,6 +1979,15 @@ impl App {
         if self.seek.is_some() {
             return;
         }
+        // A blind test owns the player: a trial that runs out is not a track
+        // to hand over from, and stepping would play something the listener
+        // never chose.
+        if self.abx.is_some() {
+            if !self.audio.as_ref().is_some_and(|audio| audio.is_empty()) {
+                ctx.request_repaint_after(Duration::from_millis(20));
+            }
+            return;
+        }
         // The preview has a track of its own and no playlist behind it, so
         // it is handled before the playlist walk below, which has nothing to
         // step to.
@@ -2323,6 +2507,8 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        self.abx_window(&ctx);
+
         self.tick_smoke(&ctx);
     }
 }
@@ -2330,6 +2516,7 @@ impl eframe::App for App {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::abx::TRIALS;
     use crate::library::Track;
 
     pub(crate) fn track(album: &str, number: u32, title: &str) -> Track {
@@ -3527,5 +3714,97 @@ pub(crate) mod tests {
         app.playing = Some(0);
         app.background = false;
         assert!(!app.keeps_playing_on_close(), "the option is off");
+    }
+
+    #[test]
+    fn a_blind_comparison_takes_the_two_selected_tracks() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        app.select_only(0);
+        app.start_abx();
+        assert!(app.abx.is_none(), "one row is not a pair");
+
+        app.select_only(0);
+        app.toggle_selection(1);
+        app.start_abx();
+        let test = app.abx.as_ref().expect("two rows start a comparison");
+        assert_eq!(test.track(Side::A).title, "A");
+        assert_eq!(test.track(Side::B).title, "B");
+    }
+
+    #[test]
+    fn a_blind_comparison_counts_ten_answers_and_then_ends() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.select_only(0);
+        app.toggle_selection(1);
+        app.start_abx();
+
+        // The window never learns which side X is on, so neither does this:
+        // the same answer ten times scores what it scores.
+        for _ in 0..TRIALS {
+            app.abx_answer(Side::A);
+            app.abx_next();
+        }
+
+        let test = app.abx.as_ref().expect("the comparison is open");
+        assert!(test.done());
+        assert_eq!(test.correct() + test.wrong(), TRIALS);
+    }
+
+    #[test]
+    fn playing_a_row_ends_the_comparison() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.select_only(0);
+        app.toggle_selection(1);
+        app.start_abx();
+
+        app.play(0);
+        assert!(
+            app.abx.is_none(),
+            "a row played by hand takes the device back"
+        );
+    }
+
+    #[test]
+    fn closing_the_comparison_leaves_nothing_playing() {
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.select_only(0);
+        app.toggle_selection(1);
+        app.start_abx();
+
+        app.close_abx();
+        assert!(app.abx.is_none());
+        assert!(app.playing.is_none());
+    }
+
+    #[test]
+    fn the_comparison_window_draws_a_trial_an_answer_and_a_result() {
+        /// Draws the window once, on a context of its own.
+        ///
+        /// Nothing uploads the textures a first frame produces, and the
+        /// delta is loud about being dropped unapplied, so it is cleared.
+        fn draw(app: &mut App) {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_pass(egui::RawInput::default(), |ctx| app.abx_window(ctx));
+            output.textures_delta.clear();
+        }
+
+        let mut app = app_with(&[("One", &["A", "B"])]);
+        app.select_only(0);
+        app.toggle_selection(1);
+        app.start_abx();
+
+        // A trial with nothing answered, then the same trial with the answer
+        // and the way on shown, and last the result: the three shapes the
+        // window takes.
+        draw(&mut app);
+        app.abx_answer(Side::A);
+        draw(&mut app);
+        app.abx_next();
+        for _ in 1..TRIALS {
+            app.abx_answer(Side::A);
+            app.abx_next();
+        }
+        assert!(app.abx.as_ref().is_some_and(|test| test.done()));
+        draw(&mut app);
     }
 }

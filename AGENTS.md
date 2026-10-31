@@ -328,6 +328,8 @@ Modules, in `src/`:
 | `format.rs` | duration and count formatting |
 | `error.rs` | the `At` trait, which puts a path on a decoder's error |
 | `cli.rs` | the command line: flags, paths and the music directory they imply |
+| `abx.rs` | the blind comparison: ten trials, scored against guessing |
+| `digest.rs` | the SHA-256 of a file, for the sums the comparison shows |
 
 Platform notes:
 
@@ -503,6 +505,52 @@ Platform notes:
   Next, Previous and Random walk until a row is played by hand. Removing
   rows edits `playlist.tracks` and nothing else: the app never deletes,
   moves or rewrites an audio file, and a test pins that.
+- A blind comparison, **Blind Comparison** in the playlist's right-click
+  menu, takes exactly two selected rows, the first as A and the second as
+  B, and lives in `App::abx` and `abx.rs`. It is kept out of the playlists
+  and the table on purpose: the table highlights the playing row, and a
+  highlight would say which of the two X is. For the same reason `advance`
+  leaves the player alone while a test is open, and playing a row or
+  opening the preview ends the test. `App::abx_seed` mixes the clock into
+  `random_state` so a restart does not repeat the sides the run before it
+  drew. Nine right answers of ten pass, the smallest count under the
+  usual 5% level: guessing reaches nine or more 1.1% of the time, eight
+  5.5%. The window opens in the middle of the screen and is dragged from
+  its title bar, and everything in it that is not a paragraph is centred:
+  the trial and its question with `ui::centered_label`, and the rows of
+  buttons with `ui::centring_shift`, which works the shift out from the
+  width each button takes. The one
+  button that is not centred is Close, which sits at the left edge: the
+  middle is where the buttons pressed over and over are, and a Close under
+  the pointer there is one press away from ending a test by accident. The
+  window is a fixed size in every state, since the answer row changes from
+  two buttons to one and a window following its content would jump under
+  the pointer on every guess; `ui::layout_tests` draws each state and
+  fails when the content outgrows it.
+  Each track is named with the SHA-256 of its file, eight characters of
+  it and the whole sum on hover: two encodes of one song carry the same
+  tags, so the sums are what tells them apart. Under the names is a plain
+  seek bar, drawn by `ui::abx_seek_bar` rather than the waveform, and a
+  `Start at` field that sets `App::abx_start`: every choice is played from
+  that moment, so the two are compared where the listener cares about
+  rather than at the intro, and it outlives one test for the same reason.
+  `digest.rs` reads both on
+  a thread and the window asks for a repaint every 50 ms until they
+  arrive, since a listener who has yet to press a button would otherwise
+  leave the frame that shows them unasked for. Whether an answer was right
+  is said only in the result: a verdict after every trial would tell the
+  listener what X is on the next one, and `abx.rs` keeps no per-trial
+  verdict to draw from.
+  A finished test is signed. `Abx::log` writes the two file names with
+  their sums, every trial with the score as it stood, and the total with
+  its p-value; `Abx::signature` is the SHA-256 of exactly that text, and
+  `Abx::signed_log` puts that text above the `-- signature --` line, so
+  `awk '/^-- signature --$/{exit} {print}' | sha256sum` over a copied log
+  gives the line under the marker. The marker is written with no blank line
+  before it, so the top of the text is the signed text byte for byte. The sums are the first lines of what is signed, which ties
+  a signature to two files rather than to two titles. `Copy Log` puts the
+  text on the clipboard, since a signature that cannot be taken out of the
+  window cannot be checked.
 - The search box is `View::searching` and `View::filter`, drawn above the
   table by `ui::search_bar`. `Ctrl+F` or `/` opens it and `View::search_focus`
   asks for the keyboard once, so the box does not take it back every frame.
