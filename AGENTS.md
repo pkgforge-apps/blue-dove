@@ -713,12 +713,18 @@ Platform notes:
   which fills the square and loses the edges of art that is not square) or
   fitted whole (`fit_rect`, which keeps every pixel and leaves the space
   beside it as background).
-- CJK titles need a system font with those glyphs; `fonts.rs` searches
-  the system and user font directories for a font whose name says it
-  carries them, preferring a full CJK face to a Japanese one, and carries
-  none itself, to keep the binary small. A list of fixed paths was not
-  enough: stock Arch and Debian install `DroidSansFallback`, which those
-  paths did not name, so every Japanese title drew as boxes.
+- Titles in a script egui's own faces do not draw need a system font:
+  `fonts.rs` searches the system and user font directories for a font
+  whose name says it carries them, one per script, preferring a full CJK
+  face to a Japanese one and an Arabic face to the catch-all `DejaVu`, and
+  carries none itself, to keep the binary small. A list of fixed paths was
+  not enough: stock Arch and Debian install `DroidSansFallback`, which
+  those paths did not name, so every Japanese title drew as boxes.
+- Only the glyphs come from that font: egui has no bidirectional layout
+  and no shaping, so a title in the Arabic script draws its letters one
+  by one, left to right, in the order the tags hold them. The font turns
+  the boxes into letters and no more; joining and reordering them is
+  work egui has left undone.
 - The directories are `XDG_DATA_HOME/fonts` and `XDG_DATA_DIRS/fonts`,
   with the spec's `/usr/local/share:/usr/share` standing in when the
   latter is unset or empty, plus the macOS and Windows locations. Reading

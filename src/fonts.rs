@@ -1,8 +1,10 @@
-//! A fallback font for titles written in Japanese, Chinese or Korean.
+//! Fallback fonts for titles egui's own faces cannot draw.
 //!
-//! egui's bundled fonts cover Latin only, so a library tagged in Japanese
-//! would draw boxes. A system font that carries those glyphs is loaded as a
-//! fallback, which costs nothing when none is installed.
+//! egui's bundled fonts cover Latin only, so a library tagged in Japanese or
+//! Persian would draw boxes. A system font that carries those glyphs is
+//! loaded as a fallback, one per script, which costs nothing when none is
+//! installed. Letters still come out in the order the tags hold them, and
+//! unjoined: egui has no bidirectional layout and no shaping to apply.
 //!
 //! Which font is installed differs from distribution to distribution and
 //! from user to user, so the font directories are searched rather than a
@@ -18,7 +20,7 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 ///
 /// A full CJK font is preferred to a Japanese-only one, since it also draws
 /// Chinese and Korean titles, and both are preferred to a fallback face.
-const PATTERNS: &[&str] = &[
+const CJK: &[&str] = &[
     "notosanscjk",
     "notoserifcjk",
     "sourcehansans",
@@ -53,6 +55,29 @@ const PATTERNS: &[&str] = &[
     "arialuni",
 ];
 
+/// File name fragments of fonts that carry Arabic letters, best first.
+///
+/// These draw the Arabic script proper and the letters Persian, Urdu and
+/// Pashto add to it. DejaVu is last because it is the face a stock Linux
+/// install almost always has.
+const ARABIC: &[&str] = &[
+    "notosansarabic",
+    "notonaskharabic",
+    "notokufiarabic",
+    "notonastaliqurdu",
+    "droidnaskh",
+    "droidkufi",
+    "amiri",
+    "scheherazade",
+    "kacst",
+    "freefarsi",
+    "dejavusans",
+];
+
+/// One entry per script egui's bundled faces draw none of, each the file name
+/// fragments of the fonts that carry it.
+const SCRIPTS: &[&[&str]] = &[CJK, ARABIC];
+
 /// Font directories that XDG does not cover.
 ///
 /// Linux keeps its fonts under `XDG_DATA_HOME` and `XDG_DATA_DIRS`, which
@@ -74,36 +99,38 @@ const DATA_DIRS: &[&str] = &["/usr/local/share", "/usr/share"];
 /// Extensions a font file can carry.
 const EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "otc"];
 
-/// Adds the best CJK font found as a fallback for both families.
+/// Adds the best font found for each script as a fallback in both families.
 pub fn install(ctx: &egui::Context) {
-    let Some(path) = find() else {
-        return;
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return;
-    };
-
     let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("cjk".to_owned(), Arc::new(FontData::from_owned(bytes)));
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+    let mut installed = false;
+    for (index, path) in find().into_iter().enumerate() {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let name = format!("script{index}");
         fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("cjk".to_owned());
+            .font_data
+            .insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push(name.clone());
+        }
+        installed = true;
     }
-    ctx.set_fonts(fonts);
+    if installed {
+        ctx.set_fonts(fonts);
+    }
 }
 
-/// The best CJK font installed, if there is one.
-fn find() -> Option<PathBuf> {
+/// The best font installed for each script, in the order [`SCRIPTS`] gives.
+fn find() -> Vec<PathBuf> {
     let mut files = Vec::new();
     for directory in directories() {
         collect(&directory, 0, &mut files);
     }
-    pick(&files)
+    SCRIPTS
+        .iter()
+        .filter_map(|patterns| pick(&files, patterns))
+        .collect()
 }
 
 /// The font directories of the system and of the user.
@@ -174,12 +201,12 @@ fn is_font(path: &Path) -> bool {
         })
 }
 
-/// The best of `files`, by the order [`PATTERNS`] gives.
+/// The best of `files`, by the order `patterns` gives.
 ///
 /// A pattern is searched for in the whole path, so a font in a directory named
 /// after its family is found too, and the first pattern that matches wins.
-fn pick(files: &[PathBuf]) -> Option<PathBuf> {
-    PATTERNS.iter().find_map(|pattern| {
+fn pick(files: &[PathBuf], patterns: &[&str]) -> Option<PathBuf> {
+    patterns.iter().find_map(|pattern| {
         files.iter().find_map(|path| {
             let name = squashed(&path.to_string_lossy());
             name.contains(pattern).then(|| path.clone())
@@ -214,7 +241,7 @@ mod tests {
             "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
         ]);
         assert_eq!(
-            pick(&files),
+            pick(&files, CJK),
             Some(PathBuf::from(
                 "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"
             ))
@@ -230,7 +257,7 @@ mod tests {
             "/usr/share/fonts/droid/DroidSansFallback.ttf",
         ]);
         assert_eq!(
-            pick(&files),
+            pick(&files, CJK),
             Some(PathBuf::from(
                 "/usr/share/fonts/droid/DroidSansFallback.ttf"
             ))
@@ -241,7 +268,7 @@ mod tests {
     fn the_directory_name_counts_as_well_as_the_file_name() {
         let files = paths(&["/usr/share/fonts/ipa/ipa-g.ttf"]);
         assert_eq!(
-            pick(&files),
+            pick(&files, CJK),
             Some(PathBuf::from("/usr/share/fonts/ipa/ipa-g.ttf"))
         );
     }
@@ -255,7 +282,7 @@ mod tests {
             "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
         ] {
             let files = paths(&[name]);
-            assert_eq!(pick(&files), Some(PathBuf::from(name)), "{name}");
+            assert_eq!(pick(&files, CJK), Some(PathBuf::from(name)), "{name}");
         }
     }
 
@@ -265,7 +292,54 @@ mod tests {
             "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         ]);
-        assert_eq!(pick(&files), None, "no font here draws Japanese");
+        assert_eq!(pick(&files, CJK), None, "no font here draws Japanese");
+    }
+
+    #[test]
+    fn a_font_with_arabic_letters_is_found() {
+        // The face a stock Debian install carries, and the one a user who
+        // writes Persian or Arabic would have installed on purpose.
+        let files = paths(&[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        ]);
+        assert_eq!(
+            pick(&files, ARABIC),
+            Some(PathBuf::from(
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"
+            )),
+            "an Arabic face beats the catch-all one"
+        );
+    }
+
+    #[test]
+    fn every_script_gets_a_font_of_its_own() {
+        let files = paths(&[
+            "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/droid/DroidNaskh-Regular.ttf",
+        ]);
+        let found: Vec<Option<PathBuf>> = SCRIPTS
+            .iter()
+            .map(|patterns| pick(&files, patterns))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                Some(PathBuf::from(
+                    "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc"
+                )),
+                Some(PathBuf::from(
+                    "/usr/share/fonts/droid/DroidNaskh-Regular.ttf"
+                )),
+            ],
+            "one font per script, so a title in either draws"
+        );
+    }
+
+    #[test]
+    fn a_latin_only_system_finds_no_arabic_font() {
+        let files = paths(&["/usr/share/fonts/liberation/LiberationSans-Regular.ttf"]);
+        assert_eq!(pick(&files, ARABIC), None, "no font here draws Arabic");
     }
 
     #[test]
