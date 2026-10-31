@@ -742,12 +742,13 @@ Platform notes:
   and one codegen unit are already on, and `opt-level` stays at the
   default rather than `"s"`.
 
-The AppImage workflow is app-specific (`appimage.yml`). It runs
-`packaging/appimage/get-dependencies.sh` first, which adds the ALSA and
-PulseAudio packages the shared setup action leaves out, then the
-debloated packages, then `scripts/package-appimage.sh` with
-`DEPLOY_PULSE` set, so quick-sharun deploys the plugin cpal reaches
-through libasound. It smoke-runs the image, and produces
+The AppImage is built by the shared release job, which `Cargo.toml` opts
+into with `appimage = true` under `[package.metadata.pkgforge]`. It
+builds and smoke-runs the image before `publish` attaches it, in the same
+step that publishes the release. `packaging/appimage/deploy.env` sets
+`DEPLOY_PULSE`, so quick-sharun deploys the plugin cpal reaches through
+libasound, and `.github/pacman-packages.txt` names the PulseAudio packages
+it has to find on the build host. The result is
 `blue-dove-anylinux-<arch>.AppImage` and its `.zsync`, named for what the
 file is: an image that runs on any distribution, not one built for a
 particular one.
@@ -760,15 +761,6 @@ no glibc loader; both printed the version and exited 0. Keep the wording
 in `README.md` and `docs/guide/installation.md` to what the image does,
 not to what the build host is.
 
-It starts on `workflow_run` of the `release` workflow, and that covers a
-release only when a person dispatched it. release-plz dispatches the
-release workflow with `GITHUB_TOKEN`, and GitHub starts no workflow for an
-event a `GITHUB_TOKEN` produced, the completion included, so a release cut
-by release-plz publishes with no image until this workflow is dispatched
-by hand with its tag. `release.yml` is a synced copy of the shared one and
-cannot carry a second job, so a real fix belongs in the shared
-`app-release.yml`.
-
 PipeWire is not deployed. cpal reaches the sound server through an ALSA
 plugin, and the image's default PCM is the pulse one, because
 `99-pulseaudio-default.conf` sorts after `99-pipewire-default.conf`. That
@@ -777,14 +769,11 @@ pipewire-pulse, which is the usual desktop setup. Deploying pipewire
 too would add its client library and SPA plugins, about 2.9 MB, that no
 config selects.
 
-The app does not set `appimage = true` in `Cargo.toml`: the shared
-release job installs neither of those packages and cannot pass
-`DEPLOY_PULSE`, so its image would carry no audio plugin. That is
-why the images are attached by the app's own workflow after the shared
-one has published the release, which needs a published release to still
-take assets: the organization's immutable releases are off. Turning them
-back on would leave every release without an AppImage, so this workflow
-would have to move into the shared release job instead.
+An app's own `appimage.yml` is not an option: it runs beside the release
+workflow, and the organization makes published releases immutable, so an
+image that finishes after `publish` cannot be attached to anything. That
+is why the deploy variable and the packages are app-side files the shared
+job reads rather than inputs to a separate workflow.
 
 `.github/apt-packages.txt` names the Debian packages the build needs and
 `.github/pacman-packages.txt` the Arch ones, which the jobs building in an
