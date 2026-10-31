@@ -1,4 +1,15 @@
 
+## [0.1.9](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.8...v0.1.9) - 2026-10-31
+
+### Features
+
+- Add a blind comparison of two tracks ([#27](https://github.com/pkgforge-apps/blue-dove/pull/27)) - ([9cb5a24](https://github.com/pkgforge-apps/blue-dove/commit/9cb5a24af62159f5706409c83defd37d2364f998))
+
+### Bug Fixes
+
+- *(window)* Send no max size for the full window ([#25](https://github.com/pkgforge-apps/blue-dove/pull/25)) - ([ce07dc7](https://github.com/pkgforge-apps/blue-dove/commit/ce07dc7d5a8d942ed999bfaaa9d14131b1418bb0))
+- Music directory files, Wayland close, MPRIS art and surround downmix ([#29](https://github.com/pkgforge-apps/blue-dove/pull/29)) - ([0555065](https://github.com/pkgforge-apps/blue-dove/commit/0555065df0f6439e8d49888263d5ffb47b46d9bd))
+
 ## [0.1.8](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.7...v0.1.8) - 2026-10-30
 
 ### Features
