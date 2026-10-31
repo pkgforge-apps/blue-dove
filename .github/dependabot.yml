@@ -1,6 +1,5 @@
 # The workflows are synced from pkgforge-apps/.github, whose own
-# Dependabot keeps their actions current. appimage.yml is this app's own,
-# so its pinned actions are kept current here.
+# Dependabot keeps their actions current.
 version: 2
 updates:
   - package-ecosystem: cargo

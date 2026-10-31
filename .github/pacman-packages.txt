@@ -1,7 +1,16 @@
-# What the build links against in the Arch containers, which the onelf and
-# AppImage jobs build in.
+# What the Arch build containers need: the libraries the build links
+# against, and the ones quick-sharun has to find to bundle them.
 #
 # alsa-lib is the same requirement as libasound2-dev on Debian: cpal reaches
 # ALSA through alsa-sys, which needs the library to compile against. It is
 # also what quick-sharun traces when it bundles the runtime library.
 alsa-lib
+
+# The sound server has to be installed before quick-sharun runs, since it
+# copies only what the build host has. pulseaudio carries libpulse, which
+# the ALSA plugin loads, and the server that plugin talks to;
+# pulseaudio-alsa is the plugin itself and the 99-pulseaudio-default.conf
+# that points the default PCM at it. Only the AppImage job deploys them,
+# but both jobs read this list.
+pulseaudio
+pulseaudio-alsa

@@ -10,6 +10,11 @@ readme = "README.md"
 publish = false
 exclude = ["/docs", "/scripts", "/.github", "/.agents", "/.claude"]
 
+# Read by the shared release workflow. `appimage = true` ships an Anylinux
+# AppImage beside the onelf bundle; see the anylinux-appimage skill.
+[package.metadata.pkgforge]
+appimage = true
+
 [dependencies]
 ape-decoder = "0.3.2"
 dirs = "7.0.0"
