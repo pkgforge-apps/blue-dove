@@ -1,4 +1,10 @@
 
+## [0.1.10](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.9...v0.1.10) - 2026-10-31
+
+### Miscellaneous Tasks
+
+- *(appimage)* Build the image in the shared release job ([#30](https://github.com/pkgforge-apps/blue-dove/pull/30)) - ([3e24856](https://github.com/pkgforge-apps/blue-dove/commit/3e24856b9610816fc8c03519933f64fb05cd4680))
+
 ## [0.1.9](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.8...v0.1.9) - 2026-10-31
 
 ### Features
