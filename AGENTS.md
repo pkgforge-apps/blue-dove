@@ -441,6 +441,15 @@ Platform notes:
   eframe's `logic` hook: `App::logic` polls the workers, the remote
   control and launches, and calls `advance`, which hands over to the next
   track when one ends. A track that ran out would otherwise sit there.
+- Wayland has no request that hides a window: the compositor owns
+  visibility, and winit's Wayland backend ignores `set_visible`, reports
+  both the visibility and the minimized state as unknown, and drops an
+  unminimize. A close there therefore asks `xdg_toplevel.set_minimized`
+  instead, which takes the window off the screen with the music still
+  playing, and `raise_window` asks for critical attention through
+  xdg-activation, the one request mutter honours, when a launch or a
+  media widget wants the window back. `on_wayland` reads the two
+  variables winit picks its backend by, since the app forces neither.
 - `cli.rs` parses the arguments before a window exists, so a bad one is
   reported on the terminal. `--help` and `--version` answer and exit;
   `--play`, `--pause`, `--play-pause`, `--stop`, `--next` and `--previous`

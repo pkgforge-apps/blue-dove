@@ -219,6 +219,10 @@ the app again brings that window back rather than starting a second
 player, which also means the desktop's launcher and a second click on the
 binary both land on the window that is already running.
 
+On Wayland the window is minimized instead, since a Wayland window cannot
+be hidden by the program that owns it: the music plays on and the window
+comes back from the dock.
+
 File > Quit still ends the app, whether or not that option is on. With
 nothing playing, closing the window ends it too: a window that would only
 sit hidden has no reason to stay.

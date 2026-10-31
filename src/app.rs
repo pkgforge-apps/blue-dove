@@ -2041,9 +2041,15 @@ impl App {
         // The window itself is asked, rather than a viewport command left for
         // eframe to apply after the pass: this way it leaves the screen as
         // the close was clicked, not a frame later.
-        match frame.winit_window() {
-            Some(window) => window.set_visible(false),
-            None => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
+        match (frame.winit_window(), on_wayland()) {
+            // Wayland has no request that hides a window: the compositor owns
+            // visibility, and winit ignores `set_visible` there. `xdg_toplevel`
+            // does have `set_minimized`, so that is what a close asks for, and
+            // the window leaves the screen with the music still playing.
+            (Some(window), true) => window.set_minimized(true),
+            (Some(window), false) => window.set_visible(false),
+            (None, true) => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+            (None, false) => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
         }
         self.save_playlists();
     }
@@ -2112,6 +2118,16 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
+        }
+        // Wayland refuses all three of those: a client cannot show,
+        // unminimize or focus its own window there. xdg-activation is the one
+        // request a compositor honours, and a window asking for critical
+        // attention is raised by mutter, which is how a minimized window
+        // comes back after a close left it that way.
+        if on_wayland() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
         }
         // The window was hidden while it had nothing to draw, so the first
         // pass after it comes back has to draw a whole frame.
@@ -2342,6 +2358,29 @@ fn chord(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> boo
 /// Case is folded on both sides, so a search for `kero` finds `Kero Kero`.
 fn matches(needle: &str, text: &str) -> bool {
     text.to_lowercase().contains(needle)
+}
+
+/// Whether the window is driving a Wayland compositor.
+///
+/// This is the rule winit picks its backend by, and the app forces neither:
+/// Wayland when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` names a display. It is
+/// the only signal a window leaves, since winit reports both its visibility
+/// and its minimized state as unknown there.
+fn on_wayland() -> bool {
+    wayland(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_SOCKET").as_deref(),
+    )
+}
+
+/// Whether one of the two variables winit reads names a display.
+///
+/// An empty value is treated as unset, which is what winit does with it.
+fn wayland(display: Option<&std::ffi::OsStr>, socket: Option<&std::ffi::OsStr>) -> bool {
+    [display, socket]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_empty())
 }
 
 /// Whether pressing back restarts the playing track rather than moving to
@@ -3634,6 +3673,29 @@ pub(crate) mod tests {
         // decision the window does.
         app.compact = compact_for(egui::vec2(300.0, 390.0));
         assert!(app.compact);
+    }
+
+    #[test]
+    fn a_window_is_on_wayland_when_a_display_names_one() {
+        // This is the rule winit picks its backend by, and the close that has
+        // to minimize rather than hide follows it.
+        let none = None;
+        assert!(!wayland(none, none), "with neither variable it is X11");
+        assert!(
+            !wayland(
+                Some(std::ffi::OsStr::new("")),
+                Some(std::ffi::OsStr::new(""))
+            ),
+            "an empty value counts as unset, the way winit reads it"
+        );
+        assert!(
+            wayland(Some(std::ffi::OsStr::new("wayland-0")), none),
+            "a display is enough"
+        );
+        assert!(
+            wayland(none, Some(std::ffi::OsStr::new("7"))),
+            "and so is a socket"
+        );
     }
 
     #[test]
