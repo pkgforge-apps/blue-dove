@@ -1149,13 +1149,16 @@ impl App {
         self.add_tracks(tracks);
     }
 
-    /// Appends every album in the library to the playlist.
+    /// Appends every track in the library to the playlist.
     ///
     /// The tracks arrive in the order the album list draws them, so the whole
-    /// library reads down the table the way it reads down the list. Loose
-    /// files are left out, since they belong to no album.
-    pub fn add_all_albums(&mut self) {
-        let tracks = self.library.album_tracks();
+    /// library reads down the table the way it reads down the list: the music
+    /// directory's own albums and loose files first, then each directory
+    /// below it. A directory of loose files has no album to add, so leaving
+    /// them out would empty the playlist for a library that holds nothing
+    /// else.
+    pub fn add_all(&mut self) {
+        let tracks = self.library.tracks_deep();
         if tracks.is_empty() {
             return;
         }
@@ -2765,7 +2768,7 @@ pub(crate) mod tests {
 
         let mixed = app
             .library
-            .directories
+            .directories()
             .iter()
             .find(|directory| directory.name == "Mixed")
             .cloned()
@@ -2791,7 +2794,7 @@ pub(crate) mod tests {
         app.library = Library::from_tracks(vec![loose]);
         app.playlists.current_mut().clear();
 
-        let singles = app.library.directories[0].clone();
+        let singles = app.library.directories()[0].clone();
         app.add_directory_at(&singles.path);
         assert_eq!(app.playlists.current().tracks, [0]);
     }
@@ -3113,7 +3116,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
         let directory = app
             .library
-            .directories
+            .directories()
             .first()
             .cloned()
             .expect("a directory");
@@ -3143,7 +3146,7 @@ pub(crate) mod tests {
 
         let boxed = app
             .library
-            .directories
+            .directories()
             .iter()
             .find(|directory| directory.name == "Box")
             .cloned()
@@ -3154,10 +3157,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn adding_the_library_queues_every_album_in_list_order() {
+    fn adding_the_library_queues_every_track_in_list_order() {
         // The list sorts directories by name and albums by title, so the
         // library is queued in that order, whatever order the scan found the
-        // files in. The loose file is not an album, so it stays out.
+        // files in. A loose file belongs to no album, so it follows the
+        // albums of the directory it sits in.
         let mut tracks = Vec::new();
         for (album, title) in [("Zeta", "B"), ("Alpha", "A"), ("Middle", "C")] {
             tracks.push(track(album, 1, title));
@@ -3169,11 +3173,66 @@ pub(crate) mod tests {
         let mut app = App::new(&egui::Context::default(), true, Vec::new());
         app.library = Library::from_tracks(tracks);
         app.playlists.current_mut().clear();
-        app.add_all_albums();
+        app.add_all();
         assert_eq!(
             app.playlists.current().tracks,
-            [1, 2, 0],
-            "Alpha, Middle, Zeta, with the loose file left out"
+            [1, 3, 2, 0],
+            "Alpha's album, its loose file, Middle, Zeta"
+        );
+    }
+
+    #[test]
+    fn adding_the_library_queues_files_sitting_in_the_music_directory() {
+        // Files directly in the music directory belong to no directory of
+        // their own, and they used to be dropped from the tree: Add All
+        // queued the subdirectories and nothing else.
+        let mut at_root = track("Root", 1, "A");
+        at_root.directory = PathBuf::new();
+        let mut stray = track("Root", 2, "B");
+        stray.directory = PathBuf::new();
+        stray.tagged_album = false;
+        let mut below = track("Below", 1, "C");
+        below.directory = PathBuf::from("Below");
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![at_root, stray, below]);
+        app.playlists.current_mut().clear();
+        app.add_all();
+        assert_eq!(
+            app.playlists.current().tracks,
+            [0, 1, 2],
+            "the album and the loose file in the music directory, then Below"
+        );
+    }
+
+    #[test]
+    fn two_disc_directories_of_the_same_name_stay_apart() {
+        // A set of releases keeps a `Disc 1` under each of them, so a
+        // directory that carried only its own name would have both answer to
+        // the same path and queue the wrong release.
+        let mut first = track("One", 1, "A");
+        first.directory = PathBuf::from("First/Disc 1");
+        let mut second = track("Two", 1, "B");
+        second.directory = PathBuf::from("Second/Disc 1");
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![first, second]);
+        app.playlists.current_mut().clear();
+
+        let disc = app
+            .library
+            .directories()
+            .iter()
+            .find(|directory| directory.name == "Second")
+            .and_then(|directory| directory.children.first())
+            .cloned()
+            .expect("the second release's disc directory");
+        assert_eq!(disc.path, PathBuf::from("Second/Disc 1"));
+        app.add_directory_at(&disc.path);
+        assert_eq!(
+            app.playlists.current().tracks,
+            [1],
+            "only the release the directory belongs to"
         );
     }
 
@@ -3182,7 +3241,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A"])]);
         let directory = app
             .library
-            .directories
+            .directories()
             .first()
             .cloned()
             .expect("a directory");

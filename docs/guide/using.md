@@ -33,6 +33,11 @@ under a directory named after it. A directory holding several albums keeps
 its row, with those albums listed beneath it. Files that carry no album
 tag appear as small rows under their directory.
 
+The albums and the untagged files that sit directly in your music
+directory have no directory row above them: they head the list, and the
+directories below follow. **Add All** in the Library header appends the
+whole library in that order, untagged files included.
+
 Click an album to select it. Double-click one to make it the playlist.
 Double-click a directory to append everything it holds: its albums in
 playing order, the loose files beside them, and then whatever its

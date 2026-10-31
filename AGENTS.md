@@ -585,10 +585,21 @@ Platform notes:
   so each album's tracks in playing order, then the loose files beside
   them, then each subdirectory. A directory of loose files alone queues
   those, since it holds no album.
-- The **Add All** button in the Library header appends every album in the
+- The **Add All** button in the Library header appends every track in the
   library to the playlist, in the order the album list draws them:
-  `Library::album_tracks` walks the tree the way `tracks_deep` does but
-  stops at the albums, so the loose files, which belong to none, stay out.
+  `Library::tracks_deep` walks the tree, loose files included. Leaving
+  them out emptied the playlist for the case that matters most, a music
+  directory holding nothing but files.
+- `Library::root` is the music directory itself, and `directories()` is
+  its children. A file sitting directly in the music directory has an
+  empty relative path, and it used to be dropped from the tree along with
+  every album in that directory: the album list, Add All and a
+  double-click all missed it. Those albums and loose files now head the
+  list at depth 0, with no row naming the music directory above them,
+  since the directories beside them are what that row would indent.
+  `place` builds each directory's path from the root down, so a nested
+  directory carries `Box/Disc 1` rather than `Disc 1` and two releases
+  with a disc directory of the same name stay apart.
 - Both long lists draw only the rows on screen. The track table does it
   from `ui::table_rows`, and the album list from `ui::LibraryRow`, a
   flattened tree built once a frame (indices and paths, no borrows) with
