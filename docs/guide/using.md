@@ -302,6 +302,54 @@ Selecting a track or pressing Next, Previous or Stop leaves the table
 showing the playing track, so the highlighted row is always what you
 hear.
 
+## Blind comparison
+
+To find out whether two files really sound different, select exactly two
+rows, right-click one of them, and pick **Blind Comparison**. The first of
+the two is labelled A and the second B, and the test plays them itself:
+**Play A**, **Play B** and **Play X**, where X is one of the two, drawn at
+random and never named while the test runs.
+
+Each track is listed with the SHA-256 of its file beside it, eight
+characters of it, with the whole sum on hover. Two encodes of the same song
+carry the same tags, so the sums are what tells them apart.
+
+Under the two names is a seek bar for the track that is playing, and a
+**Start at** field: both tracks start from that moment every time one is
+played, so a comparison can be made at the point that matters rather than at
+the beginning of the file. The field takes `m:ss` or `h:mm:ss`.
+
+A test runs ten trials. Listen to X beside A and B, say whether X was A or
+B, and move on. The test says nothing about whether an answer was right
+until the end, since saying so after each trial would give the next one
+away. Nine right answers out of ten mean you can tell the two apart, which
+is the level a test is usually held to: guessing reaches nine or more 1.1%
+of the time, while eight would be reached 5.5% of the time by guessing
+alone. The result gives the count, the chance and which side of that line
+it falls on.
+
+When the last trial is answered the result is signed. The signature is the
+SHA-256 of the log of the test: the two file names with their sums, every
+trial with the score as it stood, and the total with its p-value.
+
+**Copy Log** puts that text on the clipboard, signature block included. To
+check it, save it as `abx.log` and run:
+
+```sh
+awk '/^-- signature --$/{exit} {print}' abx.log | sha256sum
+```
+
+The hash printed has to be the line under `-- signature --`. Everything
+above that line is what was signed, byte for byte, and the file sums are
+the first lines of it: change a trial, a sum or the p-value and the hash no
+longer matches, and a signature cannot be moved to another pair of files.
+
+The comparison opens in the middle of the window; drag its title bar to
+put it somewhere else. **Run Again** asks ten fresh trials between the same
+two tracks, drawn anew, so the second run is not a repeat of the first. The
+comparison keeps out of your playlists, and playing a row or opening the
+preview closes it.
+
 ## Volume
 
 The volume slider sits at the right-hand end of the control strip, below

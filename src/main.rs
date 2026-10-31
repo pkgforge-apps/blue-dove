@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod abx;
 mod app;
 mod cache;
 mod cli;
@@ -9,6 +10,7 @@ mod config;
 mod cover;
 mod decode;
 mod dialog;
+mod digest;
 mod error;
 mod fonts;
 mod format;

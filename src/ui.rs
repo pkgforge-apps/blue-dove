@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 
+use crate::abx::{Abx, Choice, Side, TRIALS};
 use crate::app::{App, COMPACT_NAME_HEIGHT, COMPACT_WAVE_HEIGHT, ROW_HEIGHT, WAVE_HEIGHT};
 use crate::format;
 use crate::library::{Album, Track};
@@ -35,6 +36,49 @@ enum RowAction {
     Toggle(std::path::PathBuf),
     /// Play this loose track on its own.
     PlayLoose(usize),
+}
+
+/// How far apart the two answers are drawn, on top of the usual gap.
+///
+/// A guess is the one press in the window that must not land on the wrong
+/// button, so the two are given room between them.
+const ANSWER_GAP: f32 = 7.0;
+
+/// How much of a checksum the blind comparison shows, with the whole one on
+/// hover: the two files are what the test compares, and their sums are what
+/// tells two encodes of one song apart.
+const SUM_CHARS: usize = 8;
+
+/// The size of the blind comparison's window, which never changes.
+///
+/// It is the room the longest state of the test needs: both tracks with their
+/// sums, the three play buttons, the trial, the answer row and the footer.
+const ABX_WINDOW_SIZE: [f32; 2] = [420.0, 292.0];
+
+/// Characters a track's name may take before it is cut short, so that the
+/// sum beside it always fits.
+const NAME_CHARS: usize = 44;
+
+/// What a click in the blind comparison asked for.
+///
+/// It is the same split as [`RowAction`]: the test is drawn from a shared
+/// borrow of the app, so the drawing records the request and the caller
+/// applies it once the drawing is done.
+enum AbxAction {
+    /// Play the track this choice names.
+    Play(Choice),
+    /// Answer that X is this side.
+    Answer(Side),
+    /// Move to the trial after the one answered.
+    Next,
+    /// Run the test again with the same two tracks.
+    Restart,
+    /// Close the test.
+    Close,
+    /// Move the track under the bar to this moment.
+    Seek(Duration),
+    /// Play both tracks from this moment.
+    Start(Duration),
 }
 
 /// Side of the cover shown beside each album in the library list.
@@ -624,6 +668,62 @@ impl App {
                 });
             });
         });
+    }
+
+    /// Draws the blind comparison, when one is under way.
+    ///
+    /// It is a window over the playlist rather than a panel in it, so the
+    /// album list and the table stay where they are and the listener can
+    /// pick another pair as soon as the test ends. It opens in the middle of
+    /// the window and can be dragged from there.
+    pub(crate) fn abx_window(&mut self, ctx: &egui::Context) {
+        // A sum is read on a thread of its own, and nothing else would wake
+        // the window to take it in while the listener has yet to press a
+        // button: the frame that shows it has to be asked for.
+        if self.abx_reading.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        let Some(test) = &self.abx else {
+            return;
+        };
+        let sums = self
+            .abx_sums
+            .as_ref()
+            .map(|(a, b)| (a.as_str(), b.as_str()));
+        let signature = test.signature(sums);
+        let log = test.signed_log(sums);
+        let view = AbxView {
+            test,
+            sums: self.abx_sums.as_ref(),
+            position: self.position(),
+            length: self.length,
+            start: self.abx_start,
+            accent: self.accent(),
+            signature: signature.as_deref(),
+            log: &log,
+        };
+        let mut action = None;
+        egui::Window::new("Blind Comparison")
+            .collapsible(false)
+            // One size for the whole test: the answer row changes from two
+            // buttons to one, and a window that followed its content would
+            // jump under the pointer every time a guess is made.
+            .fixed_size(ABX_WINDOW_SIZE)
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                action = abx_body(ui, &view);
+            });
+        match action {
+            Some(AbxAction::Play(choice)) => self.abx_play(choice),
+            Some(AbxAction::Answer(side)) => self.abx_answer(side),
+            Some(AbxAction::Next) => self.abx_next(),
+            Some(AbxAction::Restart) => self.abx_restart(),
+            Some(AbxAction::Close) => self.close_abx(),
+            Some(AbxAction::Seek(position)) => self.abx_seek(position),
+            Some(AbxAction::Start(start)) => self.abx_set_start(start),
+            None => {}
+        }
     }
 
     /// The playing album's cover, then, in the popup, the line naming the
@@ -1217,6 +1317,18 @@ impl App {
                 self.remove_selected();
             }
             ui.separator();
+            // Two rows are what a comparison needs: the first is A and the
+            // second B.
+            let pair = self.selected_tracks().len() == 2;
+            if ui
+                .add_enabled(pair, egui::Button::new("Blind Comparison"))
+                .on_hover_text("Compares the two selected tracks without saying which is which")
+                .clicked()
+            {
+                ui.close();
+                self.start_abx();
+            }
+            ui.separator();
             if ui.button("Select All").clicked() {
                 ui.close();
                 self.select_all();
@@ -1750,6 +1862,376 @@ impl App {
             self.seek_to(fraction);
         }
     }
+}
+
+/// What the comparison's window draws, gathered from the app and the test.
+///
+/// The window holds a borrow of the test while it is drawn, so the player's
+/// own state is gathered here rather than read through the app underneath it.
+struct AbxView<'a> {
+    /// The test under way.
+    test: &'a Abx,
+    /// The sums of the two files, once they are read.
+    sums: Option<&'a (String, String)>,
+    /// Where the track under the bar is now.
+    position: Duration,
+    /// How long that track is, as the decoder reports it.
+    length: Duration,
+    /// The moment every choice is played from.
+    start: Duration,
+    /// The colour the bar and the chosen buttons are drawn in.
+    accent: Color32,
+    /// The signature over the log, once the test is over.
+    signature: Option<&'a str>,
+    /// The log the signature covers, with the signature block after it.
+    log: &'a str,
+}
+
+/// Draws the body of the blind comparison and returns what a press asked for.
+///
+/// The two tracks are named, with the sum of each file beside them: two
+/// encodes of one song carry the same tags, so the sums are what tells them
+/// apart. Which of the two X is never appears until the answer is given,
+/// which is what makes the test blind.
+fn abx_body(ui: &mut egui::Ui, view: &AbxView) -> Option<AbxAction> {
+    let test = view.test;
+    let mut action = None;
+    for (index, side) in [Side::A, Side::B].into_iter().enumerate() {
+        let track = test.track(side);
+        let sum = view
+            .sums
+            .map(|sums| if index == 0 { &sums.0 } else { &sums.1 });
+        let name = format!("{} - {}", track.title, track.artist);
+        let mut line = format!("{}: {}", side.label(), cut(&name, NAME_CHARS));
+        if let Some(sum) = sum {
+            line.push_str("  ");
+            line.push_str(short_sum(sum));
+        }
+        let response = ui.add(egui::Label::new(line).truncate());
+        if let Some(sum) = sum {
+            response.on_hover_text(format!("sha256 {sum}"));
+        }
+    }
+    ui.separator();
+
+    // The trial number heads the trial, so it sits above the bar and the
+    // moment the trial plays from, not down beside the answers.
+    if !test.done() {
+        centered_label(ui, &format!("Trial {} of {}", test.trial(), TRIALS));
+    }
+
+    // A plain bar rather than a waveform: a comparison wants a way back to
+    // the same moment, not the shape of the track.
+    let moved = ui
+        .horizontal(|ui| {
+            let clock = format!(
+                "{} / {}",
+                format::duration(view.position),
+                format::duration(view.length)
+            );
+            let font = ui.style().text_styles[&egui::TextStyle::Body].clone();
+            let room = (ui.available_width() - text_width(ui, &clock, font) - 16.0).max(60.0);
+            let moved = abx_seek_bar(ui, view.position, view.length, room, view.accent);
+            ui.label(clock);
+            moved
+        })
+        .inner;
+    if let Some(position) = moved {
+        action = Some(AbxAction::Seek(position));
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Start at");
+        let longest = test
+            .track(Side::A)
+            .duration
+            .max(test.track(Side::B).duration);
+        let mut seconds = view.start.as_secs_f64();
+        let value = egui::DragValue::new(&mut seconds)
+            .speed(1.0)
+            .range(0.0..=longest.as_secs_f64().max(1.0))
+            .custom_formatter(|value, _| format::duration(Duration::from_secs_f64(value.max(0.0))))
+            .custom_parser(parse_time);
+        let response = ui.add(value).on_hover_text(
+            "Both tracks start playing here, so every choice is heard from the same moment",
+        );
+        if response.changed() {
+            action = Some(AbxAction::Start(Duration::from_secs_f64(seconds.max(0.0))));
+        }
+    });
+    ui.separator();
+
+    // The highlight says which one the player was last sent to, on the
+    // button rather than in its text: the text stays the same so no button
+    // moves under the pointer as the trial goes on.
+    let plays = [Choice::A, Choice::B];
+    let playing = test.playing();
+    let last = playing.and_then(|choice| plays.iter().position(|play| *play == choice));
+    if let Some(index) = centered_buttons(ui, &["Play A", "Play B"], last, 0.0).clicked {
+        action = Some(AbxAction::Play(plays[index]));
+    }
+    let last = (playing == Some(Choice::X)).then_some(0);
+    if centered_buttons(ui, &["Play X"], last, 0.0)
+        .clicked
+        .is_some()
+    {
+        action = Some(AbxAction::Play(Choice::X));
+    }
+    ui.separator();
+
+    if test.done() {
+        ui.label(format!(
+            "{} of {} right, {} wrong",
+            test.correct(),
+            test.finished(),
+            test.wrong()
+        ));
+        let chance = test.p_value() * 100.0;
+        let verdict = if test.passed() {
+            "You could tell them apart."
+        } else {
+            "No evidence you could tell them apart."
+        };
+        ui.label(format!(
+            "{verdict} Guessing would have scored this well {chance:.1}% of the time."
+        ));
+        if let Some(signature) = view.signature {
+            ui.add(egui::Label::new(
+                egui::RichText::new(format!("Signature: {signature}"))
+                    .monospace()
+                    .size(8.0),
+            ))
+            .on_hover_text(
+                "The SHA-256 of the log this result was signed with; Copy Log \
+                 gives the text it covers",
+            );
+        }
+    } else {
+        // The question stays where it is whether the trial is answered or
+        // not, so nothing moves while a guess is made.
+        centered_label(ui, "Which one is X?");
+        match test.answered() {
+            None => {
+                let sides = [Side::A, Side::B];
+                // The answers are kept apart: a guess is the one press
+                // that must not land on the wrong button.
+                let gap = ANSWER_GAP;
+                if let Some(index) = centered_buttons(ui, &["X is A", "X is B"], None, gap).clicked
+                {
+                    action = Some(AbxAction::Answer(sides[index]));
+                }
+            }
+            // Whether the answer was right is said when the test ends and
+            // not before: a verdict after every trial would tell the listener
+            // which of the two X is on the next one.
+            Some(_) => {
+                if centered_buttons(ui, &["Next Trial"], None, 0.0)
+                    .clicked
+                    .is_some()
+                {
+                    action = Some(AbxAction::Next);
+                }
+            }
+        }
+    }
+
+    let (footer, _) = abx_footer(ui, test.done(), view.log);
+    if let Some(footer) = footer {
+        action = Some(footer);
+    }
+    action
+}
+
+/// Draws the row that ends the comparison and returns what it asked for.
+///
+/// Close sits at the left edge rather than in the middle with the rest: the
+/// middle is where the buttons pressed over and over are, and a Close under
+/// the pointer there is one press away from ending a test by accident. Run
+/// Again joins it once there is a test to run again.
+fn abx_footer(ui: &mut egui::Ui, done: bool, log: &str) -> (Option<AbxAction>, Rect) {
+    let mut action = None;
+    let mut room: Option<Rect> = None;
+    ui.horizontal(|ui| {
+        let close = ui.button("Close");
+        room = Some(close.rect);
+        if close.clicked() {
+            action = Some(AbxAction::Close);
+        }
+        if done {
+            let again = ui.button("Run Again");
+            room = room.map(|room| room.union(again.rect));
+            if again.clicked() {
+                action = Some(AbxAction::Restart);
+            }
+        }
+        // The log is what the signature is over, so it has to be possible to
+        // get it out of the window and hash it again somewhere else. There is
+        // nothing to check until the test is over, so the button waits.
+        if done {
+            let copy = ui.button("Copy Log");
+            room = room.map(|room| room.union(copy.rect));
+            if copy
+                .on_hover_text("The text the signature covers, ready to be checked")
+                .clicked()
+            {
+                ui.ctx().copy_text(log.to_string());
+            }
+        }
+    });
+    (action, room.unwrap_or(Rect::NOTHING))
+}
+
+/// Draws `text` centred across the window, on a line of its own.
+///
+/// Returns the room the line took, which the tests check the centring on.
+fn centered_label(ui: &mut egui::Ui, text: &str) -> Rect {
+    let font = ui.style().text_styles[&egui::TextStyle::Body].clone();
+    let room = text_width(ui, text, font);
+    let shift = ((ui.available_width() - room) / 2.0).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(shift);
+        ui.label(text).rect
+    })
+    .inner
+}
+
+/// Draws `labels` as one row and returns the index of the one clicked.
+///
+/// The row is centred across the window rather than left at its edge: egui
+/// lays a row out from the left of whatever room it has, so the space the
+/// buttons do not fill is added in front of them.
+fn centered_buttons(
+    ui: &mut egui::Ui,
+    labels: &[&str],
+    selected: Option<usize>,
+    gap: f32,
+) -> Centered {
+    let widths: Vec<f32> = labels.iter().map(|label| button_width(ui, label)).collect();
+    let spacing = ui.spacing().item_spacing.x + gap;
+    let shift = centring_shift(&widths, spacing, ui.available_width());
+    let mut clicked = None;
+    let mut room: Option<Rect> = None;
+    ui.horizontal(|ui| {
+        ui.add_space(shift);
+        for (index, label) in labels.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(gap);
+            }
+            let button = egui::Button::new(*label).selected(selected == Some(index));
+            let response = ui.add(button);
+            room = Some(room.map_or(response.rect, |room| room.union(response.rect)));
+            if response.clicked() {
+                clicked = Some(index);
+            }
+        }
+    });
+    Centered {
+        clicked,
+        rect: room.unwrap_or(Rect::NOTHING),
+    }
+}
+
+/// What a row of buttons did: the one pressed, and the room they took.
+///
+/// The room is what the row is centred on, so the tests check the centring
+/// against the buttons themselves rather than against the row they sit in,
+/// which egui stretches across the window.
+struct Centered {
+    /// The index of the button pressed, when one was.
+    clicked: Option<usize>,
+    /// The room the buttons took, the gaps between them included.
+    ///
+    /// Nothing draws from it: it is there so the tests can measure where the
+    /// row landed, which is the only way to see that it is centred.
+    #[cfg_attr(not(test), allow(dead_code))]
+    rect: Rect,
+}
+
+/// Draws the seek bar and returns the moment it was dragged to, when it was.
+///
+/// It is a bar and nothing more: the comparison is about the two files, and a
+/// waveform would only be something else to look at.
+fn abx_seek_bar(
+    ui: &mut egui::Ui,
+    position: Duration,
+    length: Duration,
+    room: f32,
+    accent: Color32,
+) -> Option<Duration> {
+    let (rect, response) = ui.allocate_exact_size(vec2(room, 10.0), Sense::click_and_drag());
+    let fraction = if length.is_zero() {
+        0.0
+    } else {
+        (position.as_secs_f32() / length.as_secs_f32()).clamp(0.0, 1.0)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5, ui.visuals().widgets.inactive.bg_fill);
+    let mut played = rect;
+    played.set_right(rect.left() + rect.width() * fraction);
+    painter.rect_filled(played, 5, accent);
+
+    // A click and a drag both name a moment: a click jumps to it, a drag
+    // follows the pointer as it goes.
+    let pointer = response
+        .interact_pointer_pos()
+        .filter(|_| response.dragged() || response.clicked());
+    pointer.map(|pointer| {
+        let fraction = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        length.mul_f32(fraction)
+    })
+}
+
+/// Reads a moment typed as `m:ss`, `h:mm:ss` or plain seconds.
+fn parse_time(text: &str) -> Option<f64> {
+    let mut seconds = 0.0;
+    for part in text.split(':') {
+        seconds = seconds * 60.0 + part.trim().parse::<f64>().ok()?;
+    }
+    Some(seconds.max(0.0))
+}
+
+/// The width `text` takes in `font`, which a row sharing its room needs.
+fn text_width(ui: &egui::Ui, text: &str, font: FontId) -> f32 {
+    ui.ctx()
+        .fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER))
+        .size()
+        .x
+}
+
+/// How far in a row of `widths` starts, so that it is centred across `width`.
+///
+/// A row wider than the window starts at its edge rather than running off it
+/// to the left, where it could not be read.
+fn centring_shift(widths: &[f32], spacing: f32, width: f32) -> f32 {
+    let total = widths.iter().sum::<f32>() + spacing * (widths.len() - 1) as f32;
+    ((width - total) / 2.0).max(0.0)
+}
+
+/// The width a button carrying `text` takes, which centring a row needs.
+///
+/// It is the text plus the padding the button draws around it; egui has no
+/// way to ask for a widget's size without drawing it, and the row has to be
+/// placed before its buttons are.
+fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+    let font = ui.style().text_styles[&egui::TextStyle::Button].clone();
+    text_width(ui, text, font) + 2.0 * ui.spacing().button_padding.x
+}
+
+/// `text` cut to `limit` characters, with an ellipsis when it does not fit.
+///
+/// The window is one size for the whole test, so a name longer than the room
+/// has to give way rather than wrap and push the buttons down.
+fn cut(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    format!("{}...", kept.trim_end())
+}
+
+/// As much of a checksum as the comparison shows; the whole one is on hover.
+fn short_sum(sum: &str) -> &str {
+    &sum[..sum.len().min(SUM_CHARS)]
 }
 
 /// How many wheel notches the pointer moved this frame.
@@ -2662,6 +3144,183 @@ mod layout_tests {
         // index the rows are matched on, not where it sits in the playlist.
         assert_eq!(row_to_reveal(true, Some(3), &[7, 3, 9]), Some(3));
         assert_eq!(row_to_reveal(true, Some(0), &[7, 3, 9]), None);
+    }
+
+    /// Runs `draw` once on a window 400 points wide, and returns what it
+    /// reports.
+    fn drawn<T>(mut draw: impl FnMut(&mut egui::Ui) -> T) -> T {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))),
+            ..Default::default()
+        };
+        let mut drawn = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.set_width(300.0);
+                drawn = Some(draw(ui));
+            });
+        });
+        // Nothing uploads the textures a first frame produces, and the delta
+        // is loud about being dropped unapplied.
+        output.textures_delta.clear();
+        drawn.expect("the pass ran")
+    }
+
+    #[test]
+    fn the_comparison_fits_its_window_in_every_state() {
+        // The window is one fixed size, so every state has to fit inside it:
+        // a taller one would be cut off, and a wider one would push the
+        // window open again.
+        use crate::app::tests::track;
+        let sums = (
+            "8923c15866d04cf7b7d9059bce7df05a".to_string(),
+            "265ce68da0504e8c6049ba126856da5a".to_string(),
+        );
+        let mut test = Abx::new(
+            track("One", 1, "A Title Long Enough To Fill The Line"),
+            track("One", 2, "Short"),
+            7,
+        );
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0))),
+            ..Default::default()
+        };
+        let mut overflow = Vec::new();
+        for state in 0..3 {
+            let sums = (state > 0).then_some(&sums);
+            let borrowed = sums.map(|(a, b)| (a.as_str(), b.as_str()));
+            let signature = test.signature(borrowed);
+            let log = test.signed_log(borrowed);
+            let view = AbxView {
+                test: &test,
+                sums,
+                position: Duration::from_secs(30),
+                length: Duration::from_secs(200),
+                start: Duration::from_secs(10),
+                accent: Color32::WHITE,
+                signature: signature.as_deref(),
+                log: &log,
+            };
+            let mut sizes = None;
+            let mut output = ctx.run_ui(input.clone(), |ui| {
+                egui::Window::new("Blind Comparison")
+                    .collapsible(false)
+                    .fixed_size(ABX_WINDOW_SIZE)
+                    .show(ui.ctx(), |ui| {
+                        let room = ui.max_rect();
+                        abx_body(ui, &view);
+                        sizes = Some((ui.min_rect().size(), room.size()));
+                    });
+            });
+            output.textures_delta.clear();
+            let (used, room) = sizes.expect("the window drew");
+            if used.x > room.x + 0.5 || used.y > room.y + 0.5 {
+                overflow.push(format!("state {state}: {used:?} in {room:?}"));
+            }
+            // On to the next state: answered, then the result.
+            test.answer(Side::A);
+            test.next();
+            if state == 1 {
+                for _ in 1..TRIALS {
+                    test.answer(Side::A);
+                    test.next();
+                }
+            }
+        }
+        assert!(overflow.is_empty(), "{overflow:?}");
+    }
+
+    #[test]
+    fn a_row_of_buttons_is_centred_across_the_window() {
+        // The margins either side of the buttons are what is checked: egui
+        // lays a row out from the left of the room it has, so the row has to
+        // be shifted in by half of what the buttons leave over.
+        // Both the plain rows and the answers, which are given a wider gap.
+        for gap in [0.0, ANSWER_GAP] {
+            let (left, right) = drawn(|ui| {
+                let window = ui.max_rect();
+                let row = centered_buttons(ui, &["Play A", "Play B"], None, gap).rect;
+                (row.left() - window.left(), window.right() - row.right())
+            });
+            assert!(
+                (left - right).abs() < 1.0,
+                "a gap of {gap}: the buttons sit {left} from one edge and {right} from the other"
+            );
+            assert!(left > 10.0, "and they are not simply at the left: {left}");
+        }
+    }
+
+    #[test]
+    fn a_button_is_as_wide_as_the_centring_assumes() {
+        // The row is placed before its buttons are drawn, so their width has
+        // to be worked out from the text and the padding. This is that
+        // sum against the width egui gives the same button.
+        let pairs = drawn(|ui| {
+            ["Play A", "Play X", "X is A", "Run Again", "Close"]
+                .into_iter()
+                .map(|label| {
+                    let assumed = button_width(ui, label);
+                    let button = egui::Button::new(label).selected(false);
+                    let drawn = ui.add(button).rect.width();
+                    (label, assumed, drawn)
+                })
+                .collect::<Vec<_>>()
+        });
+        for (label, assumed, drawn) in pairs {
+            assert!(
+                (assumed - drawn).abs() < 0.5,
+                "{label}: assumed {assumed}, drawn {drawn}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_close_button_sits_at_the_left_edge() {
+        // Close is the one button that must not be under the pointer while
+        // the listener is pressing Play and the answers, which sit in the
+        // middle: it starts at the edge and leaves the middle alone.
+        let (left, right) = drawn(|ui| {
+            let window = ui.max_rect();
+            let (_, row) = abx_footer(ui, false, "");
+            (row.left() - window.left(), window.right() - row.right())
+        });
+        assert_eq!(left, 0.0, "Close starts at the edge");
+        assert!(right > 100.0, "and leaves the middle of the window free");
+    }
+
+    #[test]
+    fn the_trial_and_its_question_are_centred_too() {
+        let (left, right) = drawn(|ui| {
+            let window = ui.max_rect();
+            let label = centered_label(ui, "Which one is X?");
+            (label.left() - window.left(), window.right() - label.right())
+        });
+        assert!(
+            (left - right).abs() < 1.0,
+            "the line sits {left} from one edge and {right} from the other"
+        );
+        assert!(left > 10.0, "and it is not simply at the left: {left}");
+    }
+
+    #[test]
+    fn a_moment_typed_into_the_start_field_is_read_as_minutes_and_seconds() {
+        assert_eq!(parse_time("90"), Some(90.0));
+        assert_eq!(parse_time("1:30"), Some(90.0));
+        assert_eq!(parse_time("1:02:03"), Some(3723.0));
+        assert_eq!(parse_time(" 0:05 "), Some(5.0));
+        assert_eq!(parse_time("nonsense"), None);
+        assert_eq!(
+            parse_time("-5"),
+            Some(0.0),
+            "a negative moment is the start"
+        );
+    }
+
+    #[test]
+    fn a_row_wider_than_the_window_starts_at_its_edge() {
+        assert_eq!(centring_shift(&[300.0, 300.0], 8.0, 200.0), 0.0);
     }
 
     #[test]
