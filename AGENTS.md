@@ -312,7 +312,7 @@ Modules, in `src/`:
 | `app.rs` | application state and the logic behind it |
 | `ui.rs` | every drawing function and the input it turns into calls |
 | `library.rs` | scanning, tag reading, album grouping |
-| `cover.rs` | album art decoding and scaling |
+| `cover.rs` | album art decoding, scaling and the PNG a media widget loads |
 | `cache.rs` | the on-disk cache of the scanned library |
 | `mpris.rs` | the MPRIS service, which lets playerctl and media keys drive it |
 | `instance.rs` | the one-window lock and the socket a second launch asks through |
@@ -320,6 +320,7 @@ Modules, in `src/`:
 | `game/` | the decoders for video game rip formats |
 | `opus.rs` | the Ogg Opus reader, which symphonia lacks |
 | `player.rs` | the rodio device, player and seek calls |
+| `downmix.rs` | the fold from a surround track to stereo |
 | `waveform.rs` | the peak envelope of a track, computed off the UI thread |
 | `dialog.rs` | the directory chooser, through rfd with zenity as the fallback |
 | `config.rs` | the settings file, playlists included |
@@ -367,6 +368,17 @@ Platform notes:
   ADPCM stream, so they are written by hand rather than pulled from a
   crate. A rip carries no tags, so `library.rs` lists it under its file
   name, and its length stays unknown until it plays.
+- A surround track is folded to stereo by `downmix.rs` before the mixer
+  sees it. rodio's own conversion keeps the first two channels and
+  throws the rest away, which drops the centre a 5.1 mix puts the voice
+  in and the surrounds it puts much of the drums in, so a surround track
+  sounded nothing like the stereo one. The fold is the ITU-R BS.775
+  matrix, in the channel order WAV and FLAC use without a layout: the
+  centre and each surround at -3 dB, the LFE dropped, and no overall
+  attenuation, which is what keeps the track at the level of a stereo
+  one. The wrapper forwards `try_seek`, so the seek bar works on it.
+  `Audio::play_file` is the only place a track reaches the device, so
+  the blind comparison is folded the same way.
 - Album art comes from `cover.rs`, which decodes JPEG with `zune-jpeg`,
   PNG with `png` and SVG with `resvg`, then scales the result. eframe
   pulls `image` in on its own, so the crate is still in the tree; the
@@ -390,8 +402,9 @@ Platform notes:
 - The scan result is cached under the user's cache directory:
   `library-<hash>.toml` holds the tags, one file per music directory so
   two of them keep a cache each, `covers/` holds the decoded art, named
-  by a hash of its pixels, and `waveforms/` holds the peak envelopes the
-  seek bar draws. Decoding art is what made a scan slow
+  by a hash of its pixels, `art/` holds those same covers as the PNGs
+  MPRIS names to a media widget, and `waveforms/` holds the peak
+  envelopes the seek bar draws. Decoding art is what made a scan slow
   (about 4.6 s of 6.2 s on seven thousand tracks), so the cache is what
   makes a start quick; a start shows the cached library and scans behind
   it. An entry is used only while the file's size and modification time
@@ -416,6 +429,22 @@ Platform notes:
   name, leaves the app running with only the remote control missing. A
   command wakes the window through a waker, since the app repaints on
   demand and would otherwise not notice until the mouse moved.
+- The art a desktop's media widget shows is named by `mpris:artUrl`, a
+  `file://` URI, so the playing track's cover is written out as a PNG
+  under `art/` in the cache, named by the hash of its pixels.
+  `cache::art_file` writes it once per cover, `cover::to_png` encodes it,
+  and `App::art` keeps the file for as long as that track plays: a frame
+  that encoded it again would cost more than drawing the window. Starting
+  a track drops it and so does a stop, so it never names the art of a
+  track that is not the one playing, and a file `prune_covers` removed is
+  written again. A cover that could not be written is remembered as such
+  rather than retried on every frame, which a cache directory refusing
+  the file would otherwise cost. `prune_covers` drops the art of a cover
+  the library no longer uses, along with the cover itself.
+- `Raise`, which is what clicking the player in a media widget sends,
+  goes through `App::raise_window` rather than the bare focus a transport
+  command gets: a window that a close left hidden or minimized has to be
+  brought back, not merely focused.
 - Random Order is one shuffle of the playlist, held in `App::shuffle`, not
   a fresh draw at every step: every track is heard once before any comes
   back, and Previous then Next plays the same track again. The order is
@@ -429,6 +458,15 @@ Platform notes:
   eframe's `logic` hook: `App::logic` polls the workers, the remote
   control and launches, and calls `advance`, which hands over to the next
   track when one ends. A track that ran out would otherwise sit there.
+- Wayland has no request that hides a window: the compositor owns
+  visibility, and winit's Wayland backend ignores `set_visible`, reports
+  both the visibility and the minimized state as unknown, and drops an
+  unminimize. A close there therefore asks `xdg_toplevel.set_minimized`
+  instead, which takes the window off the screen with the music still
+  playing, and `raise_window` asks for critical attention through
+  xdg-activation, the one request mutter honours, when a launch or a
+  media widget wants the window back. `on_wayland` reads the two
+  variables winit picks its backend by, since the app forces neither.
 - `cli.rs` parses the arguments before a window exists, so a bad one is
   reported on the terminal. `--help` and `--version` answer and exit;
   `--play`, `--pause`, `--play-pause`, `--stop`, `--next` and `--previous`
@@ -573,10 +611,21 @@ Platform notes:
   so each album's tracks in playing order, then the loose files beside
   them, then each subdirectory. A directory of loose files alone queues
   those, since it holds no album.
-- The **Add All** button in the Library header appends every album in the
+- The **Add All** button in the Library header appends every track in the
   library to the playlist, in the order the album list draws them:
-  `Library::album_tracks` walks the tree the way `tracks_deep` does but
-  stops at the albums, so the loose files, which belong to none, stay out.
+  `Library::tracks_deep` walks the tree, loose files included. Leaving
+  them out emptied the playlist for the case that matters most, a music
+  directory holding nothing but files.
+- `Library::root` is the music directory itself, and `directories()` is
+  its children. A file sitting directly in the music directory has an
+  empty relative path, and it used to be dropped from the tree along with
+  every album in that directory: the album list, Add All and a
+  double-click all missed it. Those albums and loose files now head the
+  list at depth 0, with no row naming the music directory above them,
+  since the directories beside them are what that row would indent.
+  `place` builds each directory's path from the root down, so a nested
+  directory carries `Box/Disc 1` rather than `Disc 1` and two releases
+  with a disc directory of the same name stay apart.
 - Both long lists draw only the rows on screen. The track table does it
   from `ui::table_rows`, and the album list from `ui::LibraryRow`, a
   flattened tree built once a frame (indices and paths, no borrows) with

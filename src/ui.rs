@@ -1502,12 +1502,12 @@ impl App {
             );
             let add_all = ui
                 .add_enabled(
-                    !self.library.albums.is_empty(),
+                    !self.library.tracks.is_empty(),
                     egui::Button::new("Add All").small(),
                 )
-                .on_hover_text("Appends every album in the library to this playlist");
+                .on_hover_text("Appends every track in the library to this playlist");
             if add_all.clicked() {
-                self.add_all_albums();
+                self.add_all();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
@@ -1553,9 +1553,21 @@ impl App {
     /// The tree is flattened so the list can draw only the rows on screen:
     /// the rows are built once a frame from indices, and the painting, which
     /// is the part that costs, happens for the few that are visible.
+    ///
+    /// The music directory's own albums and loose files head the list, with
+    /// no row above them: they are what sits beside the directories, not
+    /// inside one, and a row naming the directory the user picked would only
+    /// indent everything below it.
     fn library_rows(&self) -> Vec<LibraryRow> {
         let mut rows = Vec::new();
-        for directory in &self.library.directories {
+        let root = &self.library.root;
+        for &album in &root.albums {
+            rows.push(LibraryRow::Album { album, depth: 0 });
+        }
+        for &track in &root.loose {
+            rows.push(LibraryRow::Loose { track, depth: 0 });
+        }
+        for directory in self.library.directories() {
             self.push_directory_rows(&mut rows, directory, 0);
         }
         rows
@@ -3578,7 +3590,7 @@ mod layout_tests {
             "every album is listed"
         );
 
-        let path = app.library.directories[0].path.clone();
+        let path = app.library.directories()[0].path.clone();
         app.toggle_collapsed_at(&path);
         let folded = app.library_rows();
         assert!(
@@ -3596,6 +3608,31 @@ mod layout_tests {
                 .iter()
                 .all(|row| !matches!(row, LibraryRow::Album { .. })),
             "nothing under it is drawn"
+        );
+    }
+
+    #[test]
+    fn files_in_the_music_directory_get_top_level_rows() {
+        // A library whose files sit directly in the music directory has no
+        // directory to put them under, so they head the list themselves
+        // instead of vanishing from it.
+        let mut album = crate::app::tests::track("One", 1, "A");
+        album.directory = std::path::PathBuf::new();
+        let mut loose = crate::app::tests::track("One", 2, "B");
+        loose.directory = std::path::PathBuf::new();
+        loose.tagged_album = false;
+        let mut app = crate::app::App::new(&egui::Context::default(), true, Vec::new());
+        app.library = crate::library::Library::from_tracks(vec![album, loose]);
+
+        let rows = app.library_rows();
+        assert_eq!(rows.len(), 2, "the album and the loose file, nothing else");
+        assert!(
+            matches!(rows[0], LibraryRow::Album { album: 0, depth: 0 }),
+            "the album is the first row, at the top"
+        );
+        assert!(
+            matches!(rows[1], LibraryRow::Loose { track: 1, depth: 0 }),
+            "the loose file follows it, at the same depth"
         );
     }
 

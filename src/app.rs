@@ -233,6 +233,15 @@ pub struct App {
     pub(crate) service: Option<Receiver<Option<crate::mpris::Service>>>,
     /// The running MPRIS service, once it is up.
     pub(crate) mpris: Option<crate::mpris::Service>,
+    /// The PNG MPRIS names for the playing track's cover.
+    ///
+    /// A media widget draws the art from a file, so the cover is written out
+    /// once and remembered: encoding the same pixels on every frame would
+    /// cost more than drawing the window does. `None` is a cover not looked
+    /// at yet and `Some(None)` one there was nothing to write for, which is
+    /// not tried again until the next track: a cache directory that refuses
+    /// the file would otherwise be retried on every frame.
+    art: Option<Option<PathBuf>>,
     /// Widths of the track table's columns, in the order
     /// [`crate::ui::Column::ALL`] gives them.
     pub(crate) columns: [f32; 6],
@@ -381,6 +390,7 @@ impl App {
             remote,
             service,
             mpris: None,
+            art: None,
             columns: stored_columns,
             columns_shown,
             file_extension,
@@ -595,6 +605,7 @@ impl App {
         self.length = tagged;
         self.seek = None;
         self.peaks.clear();
+        self.art = None;
 
         if self.audio.is_none() {
             match Audio::open(self.volume) {
@@ -867,6 +878,7 @@ impl App {
                 self.select_only(index);
                 self.view.reveal = true;
                 self.peaks.clear();
+                self.art = None;
                 self.waveform = Some(waveform::spawn(path));
                 self.status = None;
                 self.save_playlists();
@@ -1149,13 +1161,16 @@ impl App {
         self.add_tracks(tracks);
     }
 
-    /// Appends every album in the library to the playlist.
+    /// Appends every track in the library to the playlist.
     ///
     /// The tracks arrive in the order the album list draws them, so the whole
-    /// library reads down the table the way it reads down the list. Loose
-    /// files are left out, since they belong to no album.
-    pub fn add_all_albums(&mut self) {
-        let tracks = self.library.album_tracks();
+    /// library reads down the table the way it reads down the list: the music
+    /// directory's own albums and loose files first, then each directory
+    /// below it. A directory of loose files has no album to add, so leaving
+    /// them out would empty the playlist for a library that holds nothing
+    /// else.
+    pub fn add_all(&mut self) {
+        let tracks = self.library.tracks_deep();
         if tracks.is_empty() {
             return;
         }
@@ -1933,7 +1948,7 @@ impl App {
     /// The service arrives on a channel of its own, since connecting to the
     /// bus takes a moment; until it does, this does nothing, and when the
     /// host has no bus at all it never does anything.
-    fn poll_mpris(&mut self, ctx: &egui::Context) {
+    fn poll_mpris(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut connected = false;
         if let Some(receiver) = &self.service
             && let Ok(service) = receiver.try_recv()
@@ -1956,7 +1971,14 @@ impl App {
             .flat_map(|receiver| receiver.try_iter())
             .collect();
         for command in commands {
-            self.apply(command, ctx);
+            // A raise is the one command that needs the window itself: it has
+            // to be shown again when a close left it hidden or minimized, and
+            // only the frame holds the handle that does it.
+            if command == Command::Raise {
+                self.raise_window(ctx, frame);
+            } else {
+                self.apply(command);
+            }
         }
 
         if connected || self.mpris.is_some() {
@@ -2038,9 +2060,15 @@ impl App {
         // The window itself is asked, rather than a viewport command left for
         // eframe to apply after the pass: this way it leaves the screen as
         // the close was clicked, not a frame later.
-        match frame.winit_window() {
-            Some(window) => window.set_visible(false),
-            None => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
+        match (frame.winit_window(), on_wayland()) {
+            // Wayland has no request that hides a window: the compositor owns
+            // visibility, and winit ignores `set_visible` there. `xdg_toplevel`
+            // does have `set_minimized`, so that is what a close asks for, and
+            // the window leaves the screen with the music still playing.
+            (Some(window), true) => window.set_minimized(true),
+            (Some(window), false) => window.set_visible(false),
+            (None, true) => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+            (None, false) => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
         }
         self.save_playlists();
     }
@@ -2076,7 +2104,7 @@ impl App {
         match request {
             crate::instance::Request::Show => true,
             crate::instance::Request::Action(action) => {
-                self.apply(action.command(), ctx);
+                self.apply(action.command());
                 false
             }
             crate::instance::Request::Open(paths) => {
@@ -2110,6 +2138,16 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
+        // Wayland refuses all three of those: a client cannot show,
+        // unminimize or focus its own window there. xdg-activation is the one
+        // request a compositor honours, and a window asking for critical
+        // attention is raised by mutter, which is how a minimized window
+        // comes back after a close left it that way.
+        if on_wayland() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
+        }
         // The window was hidden while it had nothing to draw, so the first
         // pass after it comes back has to draw a whole frame.
         ctx.request_repaint();
@@ -2126,7 +2164,7 @@ impl App {
     }
 
     /// Carries out one command from a D-Bus client.
-    fn apply(&mut self, command: Command, ctx: &egui::Context) {
+    fn apply(&mut self, command: Command) {
         match command {
             Command::Play if self.playing.is_none() || self.paused() => self.toggle(),
             Command::Play => {}
@@ -2150,15 +2188,47 @@ impl App {
             Command::SetVolume(volume) => self.set_volume(volume as f32),
             Command::SetRepeat(repeat) => self.set_repeat(repeat),
             Command::SetShuffle(shuffle) => self.set_random(shuffle),
-            Command::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+            // Raising needs the window itself, which only the frame holds,
+            // so `poll_mpris` takes the command before it reaches here.
+            Command::Raise => {}
         }
+    }
+
+    /// The art file MPRIS names for the playing track, when it has a cover.
+    ///
+    /// The picture is written once per track and kept: a frame that encoded
+    /// it again would spend more time on the PNG than on the window. What is
+    /// kept is dropped as soon as nothing plays, so a stop leaves the
+    /// metadata without art rather than with the art of the last track.
+    fn art_path(&mut self) -> Option<PathBuf> {
+        if self.playing.is_none() {
+            self.art = None;
+            return None;
+        }
+        match &self.art {
+            // Nothing to write for this track, or a write that failed once
+            // and would fail the same way on the next frame.
+            Some(None) => return None,
+            Some(Some(path)) if path.is_file() => return Some(path.clone()),
+            _ => {}
+        }
+        let cover = self
+            .playing
+            .and_then(|index| self.library.tracks.get(index))
+            .and_then(|track| track.cover.clone());
+        let path = cover.as_deref().and_then(crate::cache::art_file);
+        self.art = Some(path.clone());
+        path
     }
 
     /// Tells the service what the player is doing.
     fn publish(&mut self) {
-        let Some(service) = &self.mpris else {
+        if self.mpris.is_none() {
             return;
-        };
+        }
+        // The art is written before the tracks are borrowed, since writing it
+        // needs the app mutably.
+        let art = self.art_path();
         let track = self
             .playing
             .and_then(|index| self.library.tracks.get(index));
@@ -2195,8 +2265,11 @@ impl App {
             can_go_next: queue > 1,
             can_go_previous: queue > 1,
             track: self.playing.map_or(0, |index| index as u64),
+            art,
         };
-        service.update(state);
+        if let Some(service) = &self.mpris {
+            service.update(state);
+        }
     }
 
     /// Moves the playback position by `seconds`, staying inside the track.
@@ -2341,6 +2414,29 @@ fn matches(needle: &str, text: &str) -> bool {
     text.to_lowercase().contains(needle)
 }
 
+/// Whether the window is driving a Wayland compositor.
+///
+/// This is the rule winit picks its backend by, and the app forces neither:
+/// Wayland when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` names a display. It is
+/// the only signal a window leaves, since winit reports both its visibility
+/// and its minimized state as unknown there.
+fn on_wayland() -> bool {
+    wayland(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_SOCKET").as_deref(),
+    )
+}
+
+/// Whether one of the two variables winit reads names a display.
+///
+/// An empty value is treated as unset, which is what winit does with it.
+fn wayland(display: Option<&std::ffi::OsStr>, socket: Option<&std::ffi::OsStr>) -> bool {
+    [display, socket]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_empty())
+}
+
 /// Whether pressing back restarts the playing track rather than moving to
 /// the one before it.
 ///
@@ -2438,7 +2534,7 @@ impl eframe::App for App {
         // command from the command line shows up in MPRIS in the same frame
         // rather than a frame later.
         self.poll_requests(ctx, frame);
-        self.poll_mpris(ctx);
+        self.poll_mpris(ctx, frame);
         self.take_dropped_files(ctx);
         self.handle_close(ctx, frame);
         self.advance(ctx);
@@ -2765,7 +2861,7 @@ pub(crate) mod tests {
 
         let mixed = app
             .library
-            .directories
+            .directories()
             .iter()
             .find(|directory| directory.name == "Mixed")
             .cloned()
@@ -2791,7 +2887,7 @@ pub(crate) mod tests {
         app.library = Library::from_tracks(vec![loose]);
         app.playlists.current_mut().clear();
 
-        let singles = app.library.directories[0].clone();
+        let singles = app.library.directories()[0].clone();
         app.add_directory_at(&singles.path);
         assert_eq!(app.playlists.current().tracks, [0]);
     }
@@ -3113,7 +3209,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A", "B"]), ("Two", &["C"])]);
         let directory = app
             .library
-            .directories
+            .directories()
             .first()
             .cloned()
             .expect("a directory");
@@ -3143,7 +3239,7 @@ pub(crate) mod tests {
 
         let boxed = app
             .library
-            .directories
+            .directories()
             .iter()
             .find(|directory| directory.name == "Box")
             .cloned()
@@ -3154,10 +3250,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn adding_the_library_queues_every_album_in_list_order() {
+    fn adding_the_library_queues_every_track_in_list_order() {
         // The list sorts directories by name and albums by title, so the
         // library is queued in that order, whatever order the scan found the
-        // files in. The loose file is not an album, so it stays out.
+        // files in. A loose file belongs to no album, so it follows the
+        // albums of the directory it sits in.
         let mut tracks = Vec::new();
         for (album, title) in [("Zeta", "B"), ("Alpha", "A"), ("Middle", "C")] {
             tracks.push(track(album, 1, title));
@@ -3169,11 +3266,66 @@ pub(crate) mod tests {
         let mut app = App::new(&egui::Context::default(), true, Vec::new());
         app.library = Library::from_tracks(tracks);
         app.playlists.current_mut().clear();
-        app.add_all_albums();
+        app.add_all();
         assert_eq!(
             app.playlists.current().tracks,
-            [1, 2, 0],
-            "Alpha, Middle, Zeta, with the loose file left out"
+            [1, 3, 2, 0],
+            "Alpha's album, its loose file, Middle, Zeta"
+        );
+    }
+
+    #[test]
+    fn adding_the_library_queues_files_sitting_in_the_music_directory() {
+        // Files directly in the music directory belong to no directory of
+        // their own, and they used to be dropped from the tree: Add All
+        // queued the subdirectories and nothing else.
+        let mut at_root = track("Root", 1, "A");
+        at_root.directory = PathBuf::new();
+        let mut stray = track("Root", 2, "B");
+        stray.directory = PathBuf::new();
+        stray.tagged_album = false;
+        let mut below = track("Below", 1, "C");
+        below.directory = PathBuf::from("Below");
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![at_root, stray, below]);
+        app.playlists.current_mut().clear();
+        app.add_all();
+        assert_eq!(
+            app.playlists.current().tracks,
+            [0, 1, 2],
+            "the album and the loose file in the music directory, then Below"
+        );
+    }
+
+    #[test]
+    fn two_disc_directories_of_the_same_name_stay_apart() {
+        // A set of releases keeps a `Disc 1` under each of them, so a
+        // directory that carried only its own name would have both answer to
+        // the same path and queue the wrong release.
+        let mut first = track("One", 1, "A");
+        first.directory = PathBuf::from("First/Disc 1");
+        let mut second = track("Two", 1, "B");
+        second.directory = PathBuf::from("Second/Disc 1");
+
+        let mut app = App::new(&egui::Context::default(), true, Vec::new());
+        app.library = Library::from_tracks(vec![first, second]);
+        app.playlists.current_mut().clear();
+
+        let disc = app
+            .library
+            .directories()
+            .iter()
+            .find(|directory| directory.name == "Second")
+            .and_then(|directory| directory.children.first())
+            .cloned()
+            .expect("the second release's disc directory");
+        assert_eq!(disc.path, PathBuf::from("Second/Disc 1"));
+        app.add_directory_at(&disc.path);
+        assert_eq!(
+            app.playlists.current().tracks,
+            [1],
+            "only the release the directory belongs to"
         );
     }
 
@@ -3182,7 +3334,7 @@ pub(crate) mod tests {
         let mut app = app_with(&[("One", &["A"])]);
         let directory = app
             .library
-            .directories
+            .directories()
             .first()
             .cloned()
             .expect("a directory");
@@ -3575,6 +3727,54 @@ pub(crate) mod tests {
         // decision the window does.
         app.compact = compact_for(egui::vec2(300.0, 390.0));
         assert!(app.compact);
+    }
+
+    #[test]
+    fn a_window_is_on_wayland_when_a_display_names_one() {
+        // This is the rule winit picks its backend by, and the close that has
+        // to minimize rather than hide follows it.
+        let none = None;
+        assert!(!wayland(none, none), "with neither variable it is X11");
+        assert!(
+            !wayland(
+                Some(std::ffi::OsStr::new("")),
+                Some(std::ffi::OsStr::new(""))
+            ),
+            "an empty value counts as unset, the way winit reads it"
+        );
+        assert!(
+            wayland(Some(std::ffi::OsStr::new("wayland-0")), none),
+            "a display is enough"
+        );
+        assert!(
+            wayland(none, Some(std::ffi::OsStr::new("7"))),
+            "and so is a socket"
+        );
+    }
+
+    #[test]
+    fn a_stopped_player_names_no_art() {
+        // The art file is kept for the track that is playing, so a stop has
+        // to drop it: the metadata would otherwise carry the cover of a track
+        // that is no longer playing beside an empty title.
+        let mut app = app_with(&[("One", &["A"])]);
+        app.playing = Some(0);
+        app.art = Some(Some(PathBuf::from("/art/one.png")));
+        app.playing = None;
+        assert_eq!(app.art_path(), None, "nothing plays, so nothing is named");
+        assert!(app.art.is_none(), "and the last track's art is forgotten");
+    }
+
+    #[test]
+    fn a_track_without_a_cover_names_no_art() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.playing = Some(0);
+        assert_eq!(app.art_path(), None, "the track carries no cover");
+        assert_eq!(
+            app.art,
+            Some(None),
+            "and the answer is remembered, so it is not asked for again"
+        );
     }
 
     #[test]

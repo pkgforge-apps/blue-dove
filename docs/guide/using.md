@@ -33,6 +33,11 @@ under a directory named after it. A directory holding several albums keeps
 its row, with those albums listed beneath it. Files that carry no album
 tag appear as small rows under their directory.
 
+The albums and the untagged files that sit directly in your music
+directory have no directory row above them: they head the list, and the
+directories below follow. **Add All** in the Library header appends the
+whole library in that order, untagged files included.
+
 Click an album to select it. Double-click one to make it the playlist.
 Double-click a directory to append everything it holds: its albums in
 playing order, the loose files beside them, and then whatever its
@@ -206,6 +211,11 @@ The bus is optional: on a host without a session bus, or when another
 player already holds the name, the app starts and runs exactly as it does
 with one, and only the remote control is missing.
 
+The cover of the playing track goes with the metadata, so a desktop's
+media widget shows it. Asking that widget to bring the player up brings
+back a window that closing it left out of sight, rather than merely
+raising one that was already on screen.
+
 ## Playing in the background
 
 File > Keep Playing When Closed leaves the music playing when the window
@@ -213,6 +223,10 @@ is closed, so the player can sit out of sight while it plays. Launching
 the app again brings that window back rather than starting a second
 player, which also means the desktop's launcher and a second click on the
 binary both land on the window that is already running.
+
+On Wayland the window is minimized instead, since a Wayland window cannot
+be hidden by the program that owns it: the music plays on and the window
+comes back from the dock.
 
 File > Quit still ends the app, whether or not that option is on. With
 nothing playing, closing the window ends it too: a window that would only
@@ -443,5 +457,6 @@ again on the next start.
 
 The library cache and the waveforms are separate, and live under the
 platform's cache directory: `library-<hash>.toml` holds the tags, `covers/`
-the decoded album art and `waveforms/` the peak envelopes. Deleting that
-directory is safe at any time; the next start reads the files again.
+the decoded album art, `art/` the same art as the PNGs a desktop's media
+widget shows, and `waveforms/` the peak envelopes. Deleting that directory
+is safe at any time; the next start reads the files again.

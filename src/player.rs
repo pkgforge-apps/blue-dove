@@ -43,7 +43,10 @@ impl Audio {
         self.player.clear();
         self.stopped.store(false, Ordering::Relaxed);
 
-        let source = crate::decode::open(path)?;
+        // A surround stream is folded to stereo here rather than by the
+        // mixer, which would keep the front pair and drop the rest of the
+        // mix with it.
+        let source = crate::downmix::stereo(crate::decode::open(path)?);
         let duration = source.total_duration();
         self.player.append(source);
         self.player.play();

@@ -161,8 +161,13 @@ pub struct Library {
     pub tracks: Vec<Track>,
     /// Albums, sorted by title.
     pub albums: Vec<Album>,
-    /// Top-level directories under the music directory, sorted by name.
-    pub directories: Vec<Directory>,
+    /// The music directory itself.
+    ///
+    /// Its albums and loose files are the ones sitting directly in the
+    /// directory the user picked, and its children are the top-level
+    /// directories below it. It has no row of its own in the album list: what
+    /// it holds is drawn at the top of the list, above the directories.
+    pub root: Directory,
 }
 
 impl Library {
@@ -213,11 +218,11 @@ impl Library {
                 .then(a.year.cmp(&b.year))
         });
 
-        let directories = Directory::build(&tracks, &albums);
+        let root = Directory::build(&tracks, &albums);
         Self {
             tracks,
             albums,
-            directories,
+            root,
         }
     }
 
@@ -227,6 +232,10 @@ impl Library {
     }
 
     /// The directory at `path`, looked up through the tree.
+    ///
+    /// The empty path is the music directory itself, whose tracks are the
+    /// whole library, so a caller that means one directory passes a path a
+    /// row gave it rather than an empty one.
     pub fn directory(&self, path: &Path) -> Option<&Directory> {
         fn find<'a>(directory: &'a Directory, path: &Path) -> Option<&'a Directory> {
             if directory.path == path {
@@ -237,21 +246,22 @@ impl Library {
                 .iter()
                 .find_map(|child| find(child, path))
         }
-        self.directories.iter().find_map(|root| find(root, path))
+        find(&self.root, path)
     }
 
-    /// Every album's tracks in the library, in the order the album list shows
-    /// them.
+    /// The top-level directories below the music directory, sorted by name.
+    pub fn directories(&self) -> &[Directory] {
+        &self.root.children
+    }
+
+    /// Every track in the library, in the order the album list shows them.
     ///
-    /// That is each top-level directory in turn, each as
-    /// [`Directory::album_tracks`] walks it, so adding the whole library
+    /// That is the music directory's own albums, then the loose files sitting
+    /// beside them, then each directory below it, as
+    /// [`Directory::tracks_deep`] walks them, so adding the whole library
     /// queues it in the order it is drawn.
-    pub fn album_tracks(&self) -> Vec<usize> {
-        let mut found = Vec::new();
-        for directory in &self.directories {
-            found.extend(directory.album_tracks(&self.albums));
-        }
-        found
+    pub fn tracks_deep(&self) -> Vec<usize> {
+        self.root.tracks_deep(&self.albums)
     }
 
     /// The album each track belongs to, by track index.
@@ -291,25 +301,28 @@ pub struct Directory {
 impl Directory {
     /// Builds the directory tree from where the tracks were found.
     ///
-    /// A track belongs to an album when its tags name one; a file whose
-    /// tags carry no album title is loose, and the album list shows it
-    /// under its directory in a smaller row.
-    fn build(tracks: &[Track], albums: &[Album]) -> Vec<Directory> {
-        let mut roots: Vec<Directory> = Vec::new();
+    /// Answers the music directory itself, whose children are the directories
+    /// below it. A track belongs to an album when its tags name one; a file
+    /// whose tags carry no album title is loose, and the album list shows it
+    /// under its directory in a smaller row. A file sitting directly in the
+    /// music directory belongs to that directory, whose relative path is
+    /// empty, so it lands at the top of the list rather than being dropped.
+    fn build(tracks: &[Track], albums: &[Album]) -> Directory {
+        let mut root = Directory::default();
         for (index, album) in albums.iter().enumerate() {
-            place(&mut roots, &album.directory, |directory| {
+            place(&mut root, &album.directory, |directory| {
                 directory.albums.push(index)
             });
         }
         for (index, track) in tracks.iter().enumerate() {
             if !track.tagged_album {
-                place(&mut roots, &track.directory, |directory| {
+                place(&mut root, &track.directory, |directory| {
                     directory.loose.push(index)
                 });
             }
         }
-        sort_tree(&mut roots, albums);
-        roots
+        sort_tree(&mut root, albums);
+        root
     }
 
     /// Every track in this directory and below it, in the order the album list
@@ -328,24 +341,6 @@ impl Directory {
         found.extend(self.loose.iter().copied());
         for child in &self.children {
             found.extend(child.tracks_deep(albums));
-        }
-        found
-    }
-
-    /// Every album's tracks in this directory and below it, in the order the
-    /// album list shows them.
-    ///
-    /// The loose files are left out: they belong to no album, and the album
-    /// list gives them a row of their own.
-    pub fn album_tracks(&self, albums: &[Album]) -> Vec<usize> {
-        let mut found = Vec::new();
-        for &index in &self.albums {
-            if let Some(album) = albums.get(index) {
-                found.extend(album.tracks.iter().copied());
-            }
-        }
-        for child in &self.children {
-            found.extend(child.album_tracks(albums));
         }
         found
     }
@@ -390,51 +385,51 @@ impl Directory {
     }
 }
 
-/// Finds or creates the directory for `path` under `roots`, then calls `add`
-/// with it.
+/// Finds or creates the directory for `path` below `directory`, then calls
+/// `add` with it.
 ///
 /// `path` is relative to the music directory, so each component is one level
-/// of the tree.
-fn place(roots: &mut Vec<Directory>, path: &Path, add: impl FnOnce(&mut Directory)) {
+/// of the tree and an empty one is the music directory itself. The path a
+/// directory carries is the whole one, not just its own name, so two
+/// directories called `Disc 1` stay apart.
+fn place(directory: &mut Directory, path: &Path, add: impl FnOnce(&mut Directory)) {
     let mut components = path.components();
     let Some(first) = components.next() else {
+        add(directory);
         return;
     };
     let name = first.as_os_str().to_string_lossy().to_string();
-    let position = match roots.iter().position(|directory| directory.name == name) {
+    let position = match directory
+        .children
+        .iter()
+        .position(|child| child.name == name)
+    {
         Some(position) => position,
         None => {
-            roots.push(Directory {
-                name: name.clone(),
-                path: PathBuf::from(&name),
+            directory.children.push(Directory {
+                name,
+                path: directory.path.join(first),
                 ..Directory::default()
             });
-            roots.len() - 1
+            directory.children.len() - 1
         }
     };
-
-    let rest = components.as_path();
-    if rest.as_os_str().is_empty() {
-        add(&mut roots[position]);
-    } else {
-        let directory = &mut roots[position];
-        let mut below = std::mem::take(&mut directory.children);
-        place(&mut below, rest, add);
-        directory.children = below;
-    }
+    place(&mut directory.children[position], components.as_path(), add);
 }
 
 /// Sorts every directory by name, and every directory's albums by title.
-fn sort_tree(directories: &mut [Directory], albums: &[Album]) {
-    directories.sort_by_key(|directory| directory.name.to_lowercase());
-    for directory in directories.iter_mut() {
-        directory.albums.sort_by(|&a, &b| {
-            albums[a]
-                .title
-                .to_lowercase()
-                .cmp(&albums[b].title.to_lowercase())
-        });
-        sort_tree(&mut directory.children, albums);
+fn sort_tree(directory: &mut Directory, albums: &[Album]) {
+    directory
+        .children
+        .sort_by_key(|child| child.name.to_lowercase());
+    directory.albums.sort_by(|&a, &b| {
+        albums[a]
+            .title
+            .to_lowercase()
+            .cmp(&albums[b].title.to_lowercase())
+    });
+    for child in &mut directory.children {
+        sort_tree(child, albums);
     }
 }
 
@@ -871,14 +866,22 @@ mod tests {
         wav
     }
 
-    /// A directory of `count` WAV files, removed when the test ends.
+    /// A temporary directory, removed when the test ends.
     struct Scratch(PathBuf);
 
     impl Scratch {
-        fn new(name: &str, count: usize) -> Self {
+        /// An empty directory, for a test that lays out its own files.
+        fn empty(name: &str) -> Self {
             let root =
                 std::env::temp_dir().join(format!("blue-dove-{name}-{}", std::process::id()));
-            let album = root.join("An Album");
+            std::fs::create_dir_all(&root).expect("the directory is made");
+            Self(root)
+        }
+
+        /// An empty directory holding `count` WAV files in `An Album`.
+        fn new(name: &str, count: usize) -> Self {
+            let scratch = Self::empty(name);
+            let album = scratch.0.join("An Album");
             std::fs::create_dir_all(&album).expect("the directory is made");
             for index in 0..count {
                 let path = album.join(format!("{index:02}.wav"));
@@ -886,7 +889,7 @@ mod tests {
                     .and_then(|mut file| file.write_all(&wav(1)))
                     .expect("the file is written");
             }
-            Self(root)
+            scratch
         }
     }
 
@@ -1098,13 +1101,18 @@ mod tests {
         let library = Library::from_tracks(vec![single, other]);
 
         let skies = library
-            .directories
+            .directories()
             .iter()
             .find(|directory| directory.name == "Skies")
             .expect("the release directory");
         assert!(skies.is_pass_through(), "one album, nothing else");
         let disc = &skies.children[0];
         assert!(disc.is_pass_through(), "the leaf directory wraps its album");
+        assert_eq!(
+            disc.path,
+            PathBuf::from("Skies/Disc 1"),
+            "a nested directory carries its whole path, not just its own name"
+        );
     }
 
     #[test]
@@ -1115,7 +1123,7 @@ mod tests {
         two.directory = PathBuf::from("Compilation/Disc 2");
         let library = Library::from_tracks(vec![one, two]);
 
-        let compilation = &library.directories[0];
+        let compilation = &library.directories()[0];
         assert_eq!(compilation.name, "Compilation");
         assert!(!compilation.is_pass_through());
         assert_eq!(compilation.children.len(), 2);
@@ -1131,9 +1139,52 @@ mod tests {
         loose.tagged_album = false;
         let library = Library::from_tracks(vec![album, loose]);
 
-        let mixed = &library.directories[0];
+        let mixed = &library.directories()[0];
         assert_eq!(mixed.loose.len(), 1);
         assert!(!mixed.is_pass_through());
+    }
+
+    #[test]
+    fn files_in_the_music_directory_belong_to_it() {
+        // A file sitting directly in the music directory has no directory of
+        // its own below it, so its relative path is empty. It still belongs
+        // somewhere: dropping it made the album list and Add All miss every
+        // file the user had not put in a subdirectory.
+        let mut album = track("Root", "Someone", Some(1), "A");
+        album.directory = PathBuf::new();
+        let mut loose = track("Root", "Someone", Some(2), "B");
+        loose.directory = PathBuf::new();
+        loose.tagged_album = false;
+        let library = Library::from_tracks(vec![album, loose]);
+
+        assert!(library.directories().is_empty(), "no subdirectory at all");
+        assert_eq!(library.root.albums.len(), 1, "the album sits at the top");
+        assert_eq!(library.root.loose.len(), 1, "and so does the loose file");
+        assert_eq!(
+            library.tracks_deep(),
+            [0, 1],
+            "the album in playing order, then the loose file"
+        );
+    }
+
+    #[test]
+    fn a_music_directory_of_loose_files_lists_them() {
+        // The scan reads a file's directory relative to the music directory,
+        // which is empty for a file sitting in the music directory itself.
+        // The album list used to drop those files, so a folder holding only
+        // them showed nothing at all.
+        let scratch = Scratch::empty("root");
+        for name in ["one.wav", "two.wav"] {
+            std::fs::File::create(scratch.0.join(name))
+                .and_then(|mut file| file.write_all(&wav(1)))
+                .expect("the file is written");
+        }
+
+        let library = read_library(&scratch.0).expect("the directory scans");
+        assert_eq!(library.tracks.len(), 2);
+        assert!(library.directories().is_empty(), "there is no subdirectory");
+        assert_eq!(library.root.loose.len(), 2, "both files are listed");
+        assert_eq!(library.tracks_deep().len(), 2, "and both are queued");
     }
 
     #[test]
