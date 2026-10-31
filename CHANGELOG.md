@@ -1,4 +1,10 @@
 
+## [0.1.11](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.10...v0.1.11) - 2026-10-31
+
+### Bug Fixes
+
+- Pitch after a surround track, and fonts for Arabic titles ([#38](https://github.com/pkgforge-apps/blue-dove/pull/38)) - ([bc44bc2](https://github.com/pkgforge-apps/blue-dove/commit/bc44bc26db8c69bec91d566477b9c79be29a2884))
+
 ## [0.1.10](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.9...v0.1.10) - 2026-10-31
 
 ### Miscellaneous Tasks
