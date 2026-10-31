@@ -320,6 +320,7 @@ Modules, in `src/`:
 | `game/` | the decoders for video game rip formats |
 | `opus.rs` | the Ogg Opus reader, which symphonia lacks |
 | `player.rs` | the rodio device, player and seek calls |
+| `downmix.rs` | the fold from a surround track to stereo |
 | `waveform.rs` | the peak envelope of a track, computed off the UI thread |
 | `dialog.rs` | the directory chooser, through rfd with zenity as the fallback |
 | `config.rs` | the settings file, playlists included |
@@ -367,6 +368,17 @@ Platform notes:
   ADPCM stream, so they are written by hand rather than pulled from a
   crate. A rip carries no tags, so `library.rs` lists it under its file
   name, and its length stays unknown until it plays.
+- A surround track is folded to stereo by `downmix.rs` before the mixer
+  sees it. rodio's own conversion keeps the first two channels and
+  throws the rest away, which drops the centre a 5.1 mix puts the voice
+  in and the surrounds it puts much of the drums in, so a surround track
+  sounded nothing like the stereo one. The fold is the ITU-R BS.775
+  matrix, in the channel order WAV and FLAC use without a layout: the
+  centre and each surround at -3 dB, the LFE dropped, and no overall
+  attenuation, which is what keeps the track at the level of a stereo
+  one. The wrapper forwards `try_seek`, so the seek bar works on it.
+  `Audio::play_file` is the only place a track reaches the device, so
+  the blind comparison is folded the same way.
 - Album art comes from `cover.rs`, which decodes JPEG with `zune-jpeg`,
   PNG with `png` and SVG with `resvg`, then scales the result. eframe
   pulls `image` in on its own, so the crate is still in the tree; the

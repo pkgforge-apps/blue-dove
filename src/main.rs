@@ -11,6 +11,7 @@ mod cover;
 mod decode;
 mod dialog;
 mod digest;
+mod downmix;
 mod error;
 mod fonts;
 mod format;
