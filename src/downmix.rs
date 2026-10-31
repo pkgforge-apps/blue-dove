@@ -68,7 +68,9 @@ impl Iterator for Downmix {
 
 impl Source for Downmix {
     fn current_span_len(&self) -> Option<usize> {
-        None
+        self.inner
+            .current_span_len()
+            .map(|samples| samples / self.gains.len() * 2)
     }
 
     fn channels(&self) -> ChannelCount {
@@ -228,6 +230,67 @@ mod tests {
             folded.next(),
             Some(24_000.0),
             "half a second of playback, folded"
+        );
+    }
+
+    /// A folded track must not leave the track after it at the wrong pitch.
+    ///
+    /// rodio's mixer converts whatever the player's queue reports at the
+    /// moment it starts a span, and only looks again when that span ends. A
+    /// fold that reported no span was converted to stereo once and never
+    /// checked again, so a 96 kHz track left the mixer resampling at 96 kHz
+    /// for the track after it, which played at the wrong speed.
+    #[test]
+    fn a_folded_track_leaves_the_next_one_at_its_own_pitch() {
+        fn drain(out: &mut rodio::mixer::MixerSource) -> usize {
+            // Pull until the queue has been silent for a quarter of a second,
+            // then answer the last frame that carried a sample.
+            let mut samples = Vec::new();
+            for _ in 0..2_000_000u64 {
+                samples.push(out.next().unwrap_or(0.0));
+                let tail = &samples[samples.len().saturating_sub(24_000)..];
+                if samples.len() > 100_000 && tail.iter().all(|value| *value == 0.0) {
+                    break;
+                }
+            }
+            samples
+                .iter()
+                .rposition(|sample| *sample != 0.0)
+                .unwrap_or(0)
+                / 2
+        }
+
+        // One second of a tone, folded and unfolded, at the app's own rates.
+        let folded = stereo(Box::new(SamplesBuffer::new(
+            ChannelCount::new(6).expect("six channels"),
+            SampleRate::new(96_000).expect("a sample rate"),
+            core::iter::repeat_n([0.5f32, 0.0, 0.0, 0.0, 0.0, 0.0], 96_000)
+                .flatten()
+                .collect::<Vec<f32>>(),
+        )));
+        let plain = SamplesBuffer::new(
+            ChannelCount::new(2).expect("two channels"),
+            SampleRate::new(44_100).expect("a sample rate"),
+            vec![0.5f32; 88_200],
+        );
+
+        let (mixer, mut out) = rodio::mixer::mixer(
+            ChannelCount::new(2).expect("two channels"),
+            SampleRate::new(48_000).expect("a sample rate"),
+        );
+        let player = rodio::Player::connect_new(&mixer);
+
+        player.append(folded);
+        assert!(
+            (47_000..49_000).contains(&drain(&mut out)),
+            "a second of a folded 96 kHz track lasts a second at 48 kHz"
+        );
+
+        player.append(plain);
+        let frames = drain(&mut out);
+        assert!(
+            (47_000..49_000).contains(&frames),
+            "the track after it keeps its own pitch, got {frames} frames for one second"
         );
     }
 }
