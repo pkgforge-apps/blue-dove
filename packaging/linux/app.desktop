@@ -6,5 +6,5 @@ Exec=blue-dove %F
 Icon=blue-dove
 Terminal=false
 Categories=AudioVideo;Audio;Player;
-MimeType=audio/mpeg;audio/flac;audio/mp4;audio/x-m4b;audio/aac;audio/ogg;audio/vorbis;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-flac+ogg;audio/x-speex+ogg;audio/vnd.wave;audio/x-aiff;audio/x-ape;audio/x-wavpack;audio/x-musepack;audio/x-tta;application/x-shorten;audio/AMR;audio/matroska;audio/mp2;audio/x-dsp;audio/x-dsf;audio/x-dsd;
+MimeType=audio/mpeg;audio/flac;audio/mp4;audio/x-m4b;audio/aac;audio/ogg;audio/vorbis;audio/x-vorbis+ogg;audio/x-opus+ogg;audio/x-flac+ogg;audio/x-speex+ogg;audio/vnd.wave;audio/x-aiff;audio/x-ape;audio/x-wavpack;audio/x-musepack;audio/x-tta;application/x-shorten;audio/AMR;audio/matroska;audio/mp2;audio/x-dsp;audio/x-dsf;audio/x-dsd;audio/x-dff;
 StartupWMClass=blue-dove

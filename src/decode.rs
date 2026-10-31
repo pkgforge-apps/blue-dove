@@ -40,7 +40,7 @@ pub fn open(path: &Path) -> Result<Box<dyn Source + Send>, String> {
         "mpc" | "mpp" | "mp+" => Ok(Box::new(Pcm::musepack(path)?)),
         "shn" => Ok(Box::new(Pcm::shorten(path)?)),
         "amr" => Ok(Box::new(Pcm::amr(path)?)),
-        "dsf" | "dsd" => Ok(Box::new(Pcm::dsd(path)?)),
+        "dff" | "dsf" | "dsd" => Ok(Box::new(Pcm::dsd(path)?)),
         _ => {
             // The game formats a rip is stored in have their own decoders.
             if let Some(decoded) = crate::game::open(path, &extension) {
