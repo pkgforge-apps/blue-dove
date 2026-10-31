@@ -12,6 +12,7 @@
 //! lock the service reads when a client asks.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -111,6 +112,11 @@ pub struct State {
     pub can_go_previous: bool,
     /// Which track is loaded, for the metadata's track id.
     pub track: u64,
+    /// The PNG of the playing track's cover, which a media widget draws.
+    ///
+    /// MPRIS names art by a URI rather than by pixels, so the window writes
+    /// the cover out and hands over its path.
+    pub art: Option<PathBuf>,
 }
 
 /// A running MPRIS service.
@@ -143,7 +149,8 @@ impl Service {
             || previous.artists != state.artists
             || previous.album != state.album
             || previous.length != state.length
-            || previous.track != state.track)
+            || previous.track != state.track
+            || previous.art != state.art)
             && let Ok(value) = Value::from(metadata(&state)).try_to_owned()
         {
             changed.insert("Metadata", value);
@@ -539,7 +546,29 @@ fn metadata(state: &State) -> HashMap<String, OwnedValue> {
             .unwrap_or_else(|_| text("")),
     );
     metadata.insert("xesam:album".to_owned(), text(&state.album));
+    if let Some(art) = &state.art {
+        metadata.insert("mpris:artUrl".to_owned(), text(&file_url(art)));
+    }
     metadata
+}
+
+/// The `file://` URI a path is named by, which is what MPRIS takes for art.
+///
+/// Everything but an unreserved character is percent-encoded, so a cover in a
+/// directory with a space or a non-ASCII name still reads as one URI. MPRIS
+/// exists only where a session bus does, so the paths are the Unix ones: a
+/// Windows path would need its separators and its drive letter rewritten.
+fn file_url(path: &Path) -> String {
+    let mut url = String::from("file://");
+    for byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                url.push(char::from(*byte));
+            }
+            _ => url.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    url
 }
 
 /// The object path naming track `track`, which MPRIS requires.
@@ -602,6 +631,7 @@ mod tests {
             can_go_next: true,
             can_go_previous: true,
             track: 3,
+            art: None,
         }
     }
 
@@ -659,6 +689,26 @@ mod tests {
         let metadata = metadata(&State::default());
         assert_eq!(metadata["xesam:title"], text(""));
         assert_eq!(metadata["mpris:length"], number(0));
+        assert!(
+            !metadata.contains_key("mpris:artUrl"),
+            "nothing plays, so there is no art to name"
+        );
+    }
+
+    #[test]
+    fn the_metadata_names_the_art_by_a_file_uri() {
+        // A media widget loads the picture from a URI, so the path is turned
+        // into one, spaces and all.
+        let mut state = state();
+        state.art = Some(PathBuf::from(
+            "/home/some one/.cache/blue-dove/art/a1b2.png",
+        ));
+        let metadata = metadata(&state);
+        assert_eq!(
+            metadata["mpris:artUrl"],
+            text("file:///home/some%20one/.cache/blue-dove/art/a1b2.png"),
+            "the path is a file URI a client can open"
+        );
     }
 
     /// The service, when this host has a session bus to serve it on.

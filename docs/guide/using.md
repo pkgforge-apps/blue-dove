@@ -211,6 +211,11 @@ The bus is optional: on a host without a session bus, or when another
 player already holds the name, the app starts and runs exactly as it does
 with one, and only the remote control is missing.
 
+The cover of the playing track goes with the metadata, so a desktop's
+media widget shows it. Asking that widget to bring the player up brings
+back a window that closing it left out of sight, rather than merely
+raising one that was already on screen.
+
 ## Playing in the background
 
 File > Keep Playing When Closed leaves the music playing when the window
@@ -452,5 +457,6 @@ again on the next start.
 
 The library cache and the waveforms are separate, and live under the
 platform's cache directory: `library-<hash>.toml` holds the tags, `covers/`
-the decoded album art and `waveforms/` the peak envelopes. Deleting that
-directory is safe at any time; the next start reads the files again.
+the decoded album art, `art/` the same art as the PNGs a desktop's media
+widget shows, and `waveforms/` the peak envelopes. Deleting that directory
+is safe at any time; the next start reads the files again.

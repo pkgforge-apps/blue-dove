@@ -239,21 +239,50 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
 }
 
 /// Removes the stored covers no track refers to any more.
+///
+/// The `art` directory holds the same covers as PNGs, for the media widget
+/// MPRIS names them to, so it is pruned by the same rule: a file named after
+/// a key the library still uses stays.
 fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
-    let covers = dir.join("covers");
-    let Ok(entries) = std::fs::read_dir(&covers) else {
-        return;
-    };
     let keep: HashSet<&str> = tracks
         .iter()
         .filter_map(|track| track.cover.as_deref())
         .collect();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !keep.contains(name.to_string_lossy().as_ref()) {
-            let _ = std::fs::remove_file(entry.path());
+    for name in ["covers", "art"] {
+        let Ok(entries) = std::fs::read_dir(dir.join(name)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let key = file.strip_suffix(".png").unwrap_or(&file);
+            if !keep.contains(key) {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
+}
+
+/// Writes `cover` as a PNG for the media widget that names the art by a file,
+/// and answers where it landed.
+///
+/// The name is the hash of the pixels, so art that two tracks share is
+/// written once. Answers `None` when there is no cache directory, which
+/// leaves the metadata without art rather than failing.
+pub fn art_file(cover: &Cover) -> Option<PathBuf> {
+    art_file_in(&cache_dir()?.join("art"), cover)
+}
+
+/// Writes `cover` as a PNG in `dir`, and answers its path.
+fn art_file_in(dir: &Path, cover: &Cover) -> Option<PathBuf> {
+    let key = format!("{:016x}-{:x}.png", digest(&cover.rgba), cover.rgba.len());
+    let path = dir.join(key);
+    if path.is_file() {
+        return Some(path);
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    write_atomically(&path, crate::cover::to_png(cover)?).ok()?;
+    Some(path)
 }
 
 /// Stores `cover` and answers the key it is kept under.
@@ -489,6 +518,51 @@ mod tests {
     fn a_missing_cover_is_no_cover() {
         let scratch = Scratch::new("missing");
         assert!(read_cover_in(&scratch.0, "0000000000000000-0").is_none());
+    }
+
+    #[test]
+    fn a_cover_is_written_as_a_png_for_the_media_widget() {
+        // MPRIS names the art by a file, so the cover is written out as a PNG
+        // the widget can open, and the same pixels reuse the file.
+        let scratch = Scratch::new("art");
+        let path = art_file_in(&scratch.0.join("art"), &cover()).expect("the art is written");
+        assert!(path.is_file());
+        assert_eq!(path.extension().and_then(|name| name.to_str()), Some("png"));
+        let back = crate::cover::decode(&std::fs::read(&path).expect("the file reads"))
+            .expect("the art decodes as an image");
+        assert_eq!(back.rgba, cover().rgba);
+        assert_eq!(
+            art_file_in(&scratch.0.join("art"), &cover()),
+            Some(path),
+            "the same picture is written once"
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_the_art_of_a_cover_in_use() {
+        let scratch = Scratch::new("prune-art");
+        let file = scratch.0.join("song.flac");
+        std::fs::write(&file, b"not really audio").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
+        let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
+        let key = cache
+            .track(&file)
+            .and_then(CachedTrack::cover_key)
+            .expect("the cover was stored");
+        let art = art_file_in(&scratch.0.join("art"), &cover()).expect("the art is written");
+
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written again");
+
+        assert!(art.is_file(), "the art of a stored cover stays");
+        let gone = scratch.0.join("art").join("0000000000000000-0.png");
+        std::fs::write(&gone, b"stale").expect("a stale art file is written");
+        save_in(&scratch.0, &library, &scratch.0).expect("the cache is written once more");
+        assert!(!gone.is_file(), "art of a cover nothing uses goes");
+        assert!(
+            scratch.0.join("covers").join(key).is_file(),
+            "the cover itself stays"
+        );
     }
 
     /// A track whose file is `path`.

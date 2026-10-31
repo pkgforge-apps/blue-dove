@@ -1,4 +1,5 @@
-//! Album art: decoding a JPEG, PNG or SVG cover and scaling it for display.
+//! Album art: decoding a JPEG, PNG or SVG cover, scaling it for display, and
+//! encoding it back to a PNG for the art a media widget loads.
 
 use std::io::Cursor;
 
@@ -18,6 +19,24 @@ pub struct Cover {
     pub height: usize,
     /// Pixels, row by row, four bytes each.
     pub rgba: Vec<u8>,
+}
+
+/// Encodes a cover as a PNG.
+///
+/// The window draws a cover from its pixels, but MPRIS names the art of a
+/// track by a file, so the same pixels are written out in a format every
+/// media widget reads. A failure to encode answers `None`, which leaves the
+/// metadata without art rather than failing the frame.
+pub fn to_png(cover: &Cover) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, cover.width as u32, cover.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&cover.rgba).ok()?;
+    }
+    Some(bytes)
 }
 
 /// Decodes a cover from the bytes of a JPEG, PNG or SVG file.
@@ -260,5 +279,21 @@ mod tests {
     #[test]
     fn a_gif_is_no_cover() {
         assert!(decode(b"GIF89a").is_none());
+    }
+
+    #[test]
+    fn a_cover_encodes_as_a_png_of_the_same_pixels() {
+        // MPRIS hands a media widget a file, so the pixels the window draws
+        // have to come back out of one unchanged.
+        let cover = Cover {
+            width: 3,
+            height: 2,
+            rgba: [10, 20, 30, 255, 40, 50, 60, 255].repeat(3),
+        };
+        let bytes = to_png(&cover).expect("a cover encodes");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "it is a PNG");
+        let back = decode(&bytes).expect("the PNG decodes again");
+        assert_eq!((back.width, back.height), (3, 2));
+        assert_eq!(back.rgba, cover.rgba);
     }
 }

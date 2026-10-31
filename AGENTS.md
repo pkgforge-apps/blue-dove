@@ -312,7 +312,7 @@ Modules, in `src/`:
 | `app.rs` | application state and the logic behind it |
 | `ui.rs` | every drawing function and the input it turns into calls |
 | `library.rs` | scanning, tag reading, album grouping |
-| `cover.rs` | album art decoding and scaling |
+| `cover.rs` | album art decoding, scaling and the PNG a media widget loads |
 | `cache.rs` | the on-disk cache of the scanned library |
 | `mpris.rs` | the MPRIS service, which lets playerctl and media keys drive it |
 | `instance.rs` | the one-window lock and the socket a second launch asks through |
@@ -402,8 +402,9 @@ Platform notes:
 - The scan result is cached under the user's cache directory:
   `library-<hash>.toml` holds the tags, one file per music directory so
   two of them keep a cache each, `covers/` holds the decoded art, named
-  by a hash of its pixels, and `waveforms/` holds the peak envelopes the
-  seek bar draws. Decoding art is what made a scan slow
+  by a hash of its pixels, `art/` holds those same covers as the PNGs
+  MPRIS names to a media widget, and `waveforms/` holds the peak
+  envelopes the seek bar draws. Decoding art is what made a scan slow
   (about 4.6 s of 6.2 s on seven thousand tracks), so the cache is what
   makes a start quick; a start shows the cached library and scans behind
   it. An entry is used only while the file's size and modification time
@@ -428,6 +429,22 @@ Platform notes:
   name, leaves the app running with only the remote control missing. A
   command wakes the window through a waker, since the app repaints on
   demand and would otherwise not notice until the mouse moved.
+- The art a desktop's media widget shows is named by `mpris:artUrl`, a
+  `file://` URI, so the playing track's cover is written out as a PNG
+  under `art/` in the cache, named by the hash of its pixels.
+  `cache::art_file` writes it once per cover, `cover::to_png` encodes it,
+  and `App::art` keeps the file for as long as that track plays: a frame
+  that encoded it again would cost more than drawing the window. Starting
+  a track drops it and so does a stop, so it never names the art of a
+  track that is not the one playing, and a file `prune_covers` removed is
+  written again. A cover that could not be written is remembered as such
+  rather than retried on every frame, which a cache directory refusing
+  the file would otherwise cost. `prune_covers` drops the art of a cover
+  the library no longer uses, along with the cover itself.
+- `Raise`, which is what clicking the player in a media widget sends,
+  goes through `App::raise_window` rather than the bare focus a transport
+  command gets: a window that a close left hidden or minimized has to be
+  brought back, not merely focused.
 - Random Order is one shuffle of the playlist, held in `App::shuffle`, not
   a fresh draw at every step: every track is heard once before any comes
   back, and Previous then Next plays the same track again. The order is

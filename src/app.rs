@@ -233,6 +233,15 @@ pub struct App {
     pub(crate) service: Option<Receiver<Option<crate::mpris::Service>>>,
     /// The running MPRIS service, once it is up.
     pub(crate) mpris: Option<crate::mpris::Service>,
+    /// The PNG MPRIS names for the playing track's cover.
+    ///
+    /// A media widget draws the art from a file, so the cover is written out
+    /// once and remembered: encoding the same pixels on every frame would
+    /// cost more than drawing the window does. `None` is a cover not looked
+    /// at yet and `Some(None)` one there was nothing to write for, which is
+    /// not tried again until the next track: a cache directory that refuses
+    /// the file would otherwise be retried on every frame.
+    art: Option<Option<PathBuf>>,
     /// Widths of the track table's columns, in the order
     /// [`crate::ui::Column::ALL`] gives them.
     pub(crate) columns: [f32; 6],
@@ -381,6 +390,7 @@ impl App {
             remote,
             service,
             mpris: None,
+            art: None,
             columns: stored_columns,
             columns_shown,
             file_extension,
@@ -595,6 +605,7 @@ impl App {
         self.length = tagged;
         self.seek = None;
         self.peaks.clear();
+        self.art = None;
 
         if self.audio.is_none() {
             match Audio::open(self.volume) {
@@ -867,6 +878,7 @@ impl App {
                 self.select_only(index);
                 self.view.reveal = true;
                 self.peaks.clear();
+                self.art = None;
                 self.waveform = Some(waveform::spawn(path));
                 self.status = None;
                 self.save_playlists();
@@ -1936,7 +1948,7 @@ impl App {
     /// The service arrives on a channel of its own, since connecting to the
     /// bus takes a moment; until it does, this does nothing, and when the
     /// host has no bus at all it never does anything.
-    fn poll_mpris(&mut self, ctx: &egui::Context) {
+    fn poll_mpris(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut connected = false;
         if let Some(receiver) = &self.service
             && let Ok(service) = receiver.try_recv()
@@ -1959,7 +1971,14 @@ impl App {
             .flat_map(|receiver| receiver.try_iter())
             .collect();
         for command in commands {
-            self.apply(command, ctx);
+            // A raise is the one command that needs the window itself: it has
+            // to be shown again when a close left it hidden or minimized, and
+            // only the frame holds the handle that does it.
+            if command == Command::Raise {
+                self.raise_window(ctx, frame);
+            } else {
+                self.apply(command);
+            }
         }
 
         if connected || self.mpris.is_some() {
@@ -2085,7 +2104,7 @@ impl App {
         match request {
             crate::instance::Request::Show => true,
             crate::instance::Request::Action(action) => {
-                self.apply(action.command(), ctx);
+                self.apply(action.command());
                 false
             }
             crate::instance::Request::Open(paths) => {
@@ -2145,7 +2164,7 @@ impl App {
     }
 
     /// Carries out one command from a D-Bus client.
-    fn apply(&mut self, command: Command, ctx: &egui::Context) {
+    fn apply(&mut self, command: Command) {
         match command {
             Command::Play if self.playing.is_none() || self.paused() => self.toggle(),
             Command::Play => {}
@@ -2169,15 +2188,47 @@ impl App {
             Command::SetVolume(volume) => self.set_volume(volume as f32),
             Command::SetRepeat(repeat) => self.set_repeat(repeat),
             Command::SetShuffle(shuffle) => self.set_random(shuffle),
-            Command::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+            // Raising needs the window itself, which only the frame holds,
+            // so `poll_mpris` takes the command before it reaches here.
+            Command::Raise => {}
         }
+    }
+
+    /// The art file MPRIS names for the playing track, when it has a cover.
+    ///
+    /// The picture is written once per track and kept: a frame that encoded
+    /// it again would spend more time on the PNG than on the window. What is
+    /// kept is dropped as soon as nothing plays, so a stop leaves the
+    /// metadata without art rather than with the art of the last track.
+    fn art_path(&mut self) -> Option<PathBuf> {
+        if self.playing.is_none() {
+            self.art = None;
+            return None;
+        }
+        match &self.art {
+            // Nothing to write for this track, or a write that failed once
+            // and would fail the same way on the next frame.
+            Some(None) => return None,
+            Some(Some(path)) if path.is_file() => return Some(path.clone()),
+            _ => {}
+        }
+        let cover = self
+            .playing
+            .and_then(|index| self.library.tracks.get(index))
+            .and_then(|track| track.cover.clone());
+        let path = cover.as_deref().and_then(crate::cache::art_file);
+        self.art = Some(path.clone());
+        path
     }
 
     /// Tells the service what the player is doing.
     fn publish(&mut self) {
-        let Some(service) = &self.mpris else {
+        if self.mpris.is_none() {
             return;
-        };
+        }
+        // The art is written before the tracks are borrowed, since writing it
+        // needs the app mutably.
+        let art = self.art_path();
         let track = self
             .playing
             .and_then(|index| self.library.tracks.get(index));
@@ -2214,8 +2265,11 @@ impl App {
             can_go_next: queue > 1,
             can_go_previous: queue > 1,
             track: self.playing.map_or(0, |index| index as u64),
+            art,
         };
-        service.update(state);
+        if let Some(service) = &self.mpris {
+            service.update(state);
+        }
     }
 
     /// Moves the playback position by `seconds`, staying inside the track.
@@ -2480,7 +2534,7 @@ impl eframe::App for App {
         // command from the command line shows up in MPRIS in the same frame
         // rather than a frame later.
         self.poll_requests(ctx, frame);
-        self.poll_mpris(ctx);
+        self.poll_mpris(ctx, frame);
         self.take_dropped_files(ctx);
         self.handle_close(ctx, frame);
         self.advance(ctx);
@@ -3695,6 +3749,31 @@ pub(crate) mod tests {
         assert!(
             wayland(none, Some(std::ffi::OsStr::new("7"))),
             "and so is a socket"
+        );
+    }
+
+    #[test]
+    fn a_stopped_player_names_no_art() {
+        // The art file is kept for the track that is playing, so a stop has
+        // to drop it: the metadata would otherwise carry the cover of a track
+        // that is no longer playing beside an empty title.
+        let mut app = app_with(&[("One", &["A"])]);
+        app.playing = Some(0);
+        app.art = Some(Some(PathBuf::from("/art/one.png")));
+        app.playing = None;
+        assert_eq!(app.art_path(), None, "nothing plays, so nothing is named");
+        assert!(app.art.is_none(), "and the last track's art is forgotten");
+    }
+
+    #[test]
+    fn a_track_without_a_cover_names_no_art() {
+        let mut app = app_with(&[("One", &["A"])]);
+        app.playing = Some(0);
+        assert_eq!(app.art_path(), None, "the track carries no cover");
+        assert_eq!(
+            app.art,
+            Some(None),
+            "and the answer is remembered, so it is not asked for again"
         );
     }
 
