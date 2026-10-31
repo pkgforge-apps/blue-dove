@@ -40,6 +40,7 @@ pub fn open(path: &Path) -> Result<Box<dyn Source + Send>, String> {
         "mpc" | "mpp" | "mp+" => Ok(Box::new(Pcm::musepack(path)?)),
         "shn" => Ok(Box::new(Pcm::shorten(path)?)),
         "amr" => Ok(Box::new(Pcm::amr(path)?)),
+        "dsf" | "dsd" => Ok(Box::new(Pcm::dsd(path)?)),
         _ => {
             // The game formats a rip is stored in have their own decoders.
             if let Some(decoded) = crate::game::open(path, &extension) {
@@ -234,6 +235,53 @@ impl Pcm {
             samples.extend(pcm.iter().map(|sample| f32::from(*sample) * scale(16)));
         }
         Self::wrap(samples, 1, variant.sample_rate(), path)
+    }
+
+    /// Decodes a DSD/DSF audio file.
+    ///
+    /// Reads DSD (Direct Stream Digital) audio from DSF or DFF container files.
+    /// DSD is a 1-bit delta-sigma modulated audio format at very high sample rates
+    /// (DSD64 = 2.8224 MHz, DSD128 = 11.2896 MHz, etc.).
+    fn dsd(path: &Path) -> Result<Self, String> {
+        use dsd_reader::{DsdReader, FmtType};
+
+        let data = std::fs::read(path).at(path)?;
+        let mut dsd_reader = DsdReader::from_container(path)
+            .map_err(|error| format!("{}: {}", path.display(), error))?;
+
+        let channels_num = dsd_reader.channels_num();
+        let dsd_rate = dsd_reader.dsd_rate();
+        let rate = dsd_rate as i32 * 2_822_400; // DSD64 base rate in Hz
+
+        let mut samples = Vec::new();
+
+        for (_, chan_bufs) in dsd_reader.dsd_iter().map_err(|error| {
+            format!("{}: {}", path.display(), error)
+        })? {
+            for chan in 0..channels_num {
+                for byte in &chan_bufs[chan] {
+                    // Each byte contains 8 DSD samples (1 bit each), packed LSB first
+                    let bits = if byte & 0x01 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x02 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x04 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x08 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x10 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x20 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x40 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                    let bits = if byte & 0x80 != 0 { 1.0 } else { 0.0 };
+                    samples.push(bits);
+                }
+            }
+        }
+
+        Self::wrap(samples, channels_num as u32, rate as u32, path)
     }
 
     /// Wraps decoded samples, rejecting a stream that holds no audio.
