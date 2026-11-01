@@ -7,7 +7,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -81,8 +80,11 @@ pub struct Track {
     pub number: Option<u32>,
     /// Playing time, as the tags report it.
     pub duration: Duration,
-    /// Cover art from the file's tags, decoded to RGBA.
-    pub cover: Option<Arc<Cover>>,
+    /// Key of the cover art, which the cache holds as the encoded picture.
+    ///
+    /// Nothing is decoded while the library is listed, so a directory of
+    /// thousands of tracks costs no image work at all to list.
+    pub cover: Option<String>,
     /// Directory the file sits in, relative to the music directory.
     pub directory: PathBuf,
     /// Whether the tags named an album.
@@ -121,9 +123,6 @@ impl Track {
     }
 }
 
-/// An album cover decoded to RGBA, ready to become a texture.
-pub use crate::cover::Cover;
-
 /// Tracks that share an album, in playing order.
 #[derive(Clone)]
 pub struct Album {
@@ -135,8 +134,8 @@ pub struct Album {
     pub year: Option<u32>,
     /// Indices into [`Library::tracks`], in playing order.
     pub tracks: Vec<usize>,
-    /// Cover art, taken from the first track that carries any.
-    pub cover: Option<Arc<Cover>>,
+    /// Key of the cover art, taken from the first track that carries any.
+    pub cover: Option<String>,
     /// Directory the album was found in, relative to the music directory.
     pub directory: PathBuf,
 }
@@ -525,7 +524,7 @@ fn read_library_with(
         if seen % PROGRESS_EVERY == 0 {
             progress(seen);
         }
-        if let Some(track) = cached_track(&cache, entry.path(), &mut covers) {
+        if let Some(track) = cached_track(&cache, entry.path()) {
             tracks.push(track);
         } else if let Some(track) = read_track(entry.path(), root, &mut covers) {
             tracks.push(track);
@@ -544,35 +543,26 @@ fn read_library_with(
 
 /// The track the cache holds for `path`, when it still fits the file.
 ///
-/// Returns `None` when there is no entry, the file changed, or the cover it
-/// names has gone, which leaves the caller to read the file instead.
-fn cached_track(
-    cache: &Option<crate::cache::Cache>,
-    path: &Path,
-    covers: &mut Covers,
-) -> Option<Track> {
+/// Returns `None` when there is no entry or the file changed, which leaves the
+/// caller to read the file instead.
+fn cached_track(cache: &Option<crate::cache::Cache>, path: &Path) -> Option<Track> {
     let cached = cache.as_ref()?.track(path)?;
-    if !cached.is_fresh() {
-        return None;
-    }
-    covers.restored(cached)
+    cached.is_fresh().then(|| cached.to_track())
 }
 
 /// Rebuilds the library from the cache, without reading an audio file.
 ///
-/// Answers `None` when the cache does not fit the directory any more: an entry
-/// whose file changed, or whose cover went missing, makes a scan the only
-/// answer, and the caller runs one.
+/// This is what the window opens with, so it takes the cache at its word
+/// rather than checking every file against the disk: an entry whose file
+/// changed is caught by the scan that runs behind the window, which reads that
+/// file again and rewrites the cache. Checking here would cost one `stat` per
+/// track of a library that may hold thousands, which is time the window would
+/// spend blank.
+///
+/// Answers `None` when there is no cache for the directory at all.
 pub fn read_cache(root: &Path) -> Option<Library> {
     let cache = crate::cache::Cache::load(root)?;
-    let mut covers = Covers::default();
-    let mut tracks = Vec::with_capacity(cache.all().len());
-    for cached in cache.all() {
-        if !cached.is_fresh() {
-            return None;
-        }
-        tracks.push(covers.restored(cached)?);
-    }
+    let tracks: Vec<Track> = cache.all().iter().map(|cached| cached.to_track()).collect();
     if tracks.is_empty() {
         return None;
     }
@@ -647,6 +637,8 @@ fn read_track(path: &Path, root: &Path, covers: &mut Covers) -> Option<Track> {
         .or_else(|| text(ItemKey::Year))
         .and_then(|date| date.get(..4).and_then(|year| year.parse().ok()));
 
+    // The picture is stored rather than decoded: `art.rs` decodes it off the
+    // drawing thread, and a scan of thousands of tracks does no image work.
     let embedded = tag
         .and_then(|tag| tag.pictures().first())
         .and_then(|picture| covers.shared(picture.data()));
@@ -678,69 +670,45 @@ fn read_track(path: &Path, root: &Path, covers: &mut Covers) -> Option<Track> {
     })
 }
 
-/// Cover art found during a scan, decoded once each.
+/// Cover art found during a scan, stored and remembered once each.
 ///
-/// An album whose every track embeds the same artwork decodes it once and
-/// holds one copy, and a directory image is read once rather than per track.
+/// An album whose every track embeds the same artwork stores it once, and a
+/// directory image is read once rather than per track. What is kept is the key
+/// the picture was stored under, not its pixels: a scan writes the pictures it
+/// finds and the window decodes them as it draws them.
 #[derive(Default)]
 struct Covers {
-    /// Decoded covers by the hash of their encoded bytes.
-    by_hash: HashMap<u64, Option<Arc<Cover>>>,
+    /// Keys by the hash of the encoded bytes, so one picture is stored once.
+    by_hash: HashMap<u64, Option<String>>,
     /// Directory images, by directory.
-    by_directory: HashMap<PathBuf, Option<Arc<Cover>>>,
-    /// Covers read back from the cache, by the key they are stored under.
-    by_key: HashMap<String, Option<Arc<Cover>>>,
+    by_directory: HashMap<PathBuf, Option<String>>,
 }
 
 impl Covers {
-    /// Rebuilds a cached track, reading its cover at most once per key.
-    fn restored(&mut self, cached: &crate::cache::CachedTrack) -> Option<Track> {
-        // A track whose art went missing is read again, so the album keeps
-        // the picture it had.
-        let cover = match cached.cover_key() {
-            Some(key) => Some(self.stored(key)?),
-            None => None,
-        };
-        Some(cached.to_track(cover))
-    }
-
-    /// The cover stored under `key`, read at most once.
-    ///
-    /// A key whose art is gone is remembered as missing too, so a cache that
-    /// lost a picture is asked for it once rather than once per track.
-    fn stored(&mut self, key: &str) -> Option<Arc<Cover>> {
-        if let Some(cover) = self.by_key.get(key) {
-            return cover.clone();
-        }
-        let cover = crate::cache::read_cover(key).map(Arc::new);
-        self.by_key.insert(key.to_string(), cover.clone());
-        cover
-    }
-
-    /// The decoded cover for `bytes`, decoding it the first time.
-    fn shared(&mut self, bytes: &[u8]) -> Option<Arc<Cover>> {
+    /// The key for the picture in `bytes`, storing it the first time.
+    fn shared(&mut self, bytes: &[u8]) -> Option<String> {
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
-        let key = hasher.finish();
-        if let Some(cover) = self.by_hash.get(&key) {
-            return cover.clone();
+        let hash = hasher.finish();
+        if let Some(key) = self.by_hash.get(&hash) {
+            return key.clone();
         }
-        let cover = crate::cover::decode(bytes).map(Arc::new);
-        self.by_hash.insert(key, cover.clone());
-        cover
+        let key = crate::cache::store_cover(bytes);
+        self.by_hash.insert(hash, key.clone());
+        key
     }
 
-    /// The cover image belonging to `directory`, when there is one.
+    /// The key of the cover belonging to `directory`, when there is one.
     ///
     /// Release directories hold the artwork in one of a few ways: beside the
     /// tracks under a conventional name, in a `covers` or `scans` directory, or
-    /// for a multi-disc rip in the directory above the disc directories. All three
-    /// are looked for, best first.
-    fn directory_cover(&mut self, directory: &Path) -> Option<Arc<Cover>> {
-        if let Some(cover) = self.by_directory.get(directory) {
-            return cover.clone();
+    /// for a multi-disc rip in the directory above the disc directories. All
+    /// three are looked for, best first.
+    fn directory_cover(&mut self, directory: &Path) -> Option<String> {
+        if let Some(key) = self.by_directory.get(directory) {
+            return key.clone();
         }
-        let cover = art_in(directory)
+        let bytes = art_in(directory)
             .or_else(|| art_directory_of(directory))
             // A disc directory's artwork usually sits with the other discs.
             .or_else(|| {
@@ -749,12 +717,11 @@ impl Covers {
                     .filter(|_| is_disc_directory(directory))?;
                 art_in(parent).or_else(|| art_directory_of(parent))
             })
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| crate::cover::decode(&bytes))
-            .map(Arc::new);
+            .and_then(|path| std::fs::read(path).ok());
+        let key = bytes.and_then(|bytes| self.shared(&bytes));
         self.by_directory
-            .insert(directory.to_path_buf(), cover.clone());
-        cover
+            .insert(directory.to_path_buf(), key.clone());
+        key
     }
 }
 
@@ -977,6 +944,32 @@ mod tests {
             assert_eq!(from_scan.path, from_cache.path);
             assert_eq!(from_scan.duration, from_cache.duration);
         }
+    }
+
+    #[test]
+    fn a_changed_file_still_opens_from_the_cache() {
+        // The window opens from the cache without a `stat` per track, so an
+        // entry whose file was retagged since is shown as it was stored; the
+        // scan behind the window is what reads that file again.
+        let directory = Scratch::new("stale-cache", 4);
+        let scanned = read_library(&directory.0).expect("the directory scans");
+        let victim = scanned.tracks[0].path.clone();
+        std::fs::File::create(&victim)
+            .and_then(|mut file| file.write_all(&wav(2)))
+            .expect("the file is rewritten");
+
+        let cached = read_cache(&directory.0).expect("the cache still opens");
+        assert_eq!(cached.tracks.len(), scanned.tracks.len());
+        let shown = cached
+            .tracks
+            .iter()
+            .find(|track| track.path == victim)
+            .expect("the changed file is listed");
+        assert_eq!(
+            shown.duration,
+            Duration::from_secs(1),
+            "the window shows what the cache holds, as it was stored"
+        );
     }
 
     #[test]
@@ -1283,11 +1276,16 @@ mod tests {
         art.image("Release", "cover.jpg");
 
         let mut covers = Covers::default();
-        let cover = covers
+        let key = covers
             .directory_cover(&root.join("Disc 1"))
             .expect("the disc directory finds the set's art");
 
-        assert_eq!((cover.width, cover.height), (1, 1));
+        let picture = std::fs::read(root.join("cover.jpg")).expect("the picture reads");
+        assert_eq!(
+            key,
+            crate::cache::cover_key(&picture),
+            "the key names the bytes"
+        );
     }
 
     #[test]

@@ -313,6 +313,7 @@ Modules, in `src/`:
 | `ui.rs` | every drawing function and the input it turns into calls |
 | `library.rs` | scanning, tag reading, album grouping |
 | `cover.rs` | album art decoding, scaling and the PNG a media widget loads |
+| `art.rs` | the pictures a window has decoded, off the drawing thread |
 | `cache.rs` | the on-disk cache of the scanned library |
 | `mpris.rs` | the MPRIS service, which lets playerctl and media keys drive it |
 | `instance.rs` | the one-window lock and the socket a second launch asks through |
@@ -380,9 +381,17 @@ Platform notes:
   `Audio::play_file` is the only place a track reaches the device, so
   the blind comparison is folded the same way.
 - Album art comes from `cover.rs`, which decodes JPEG with `zune-jpeg`,
-  PNG with `png` and SVG with `resvg`, then scales the result. eframe
-  pulls `image` in on its own, so the crate is still in the tree; the
-  app does not use it.
+  PNG with `png` and SVG with `resvg`, then scales the result. Nothing
+  decodes a picture while a library is listed: a scan stores the encoded
+  bytes and keeps only the key, and `art.rs` decodes them on a thread of
+  its own, so a library of thousands of tracks opens without decoding a
+  single image. The picture the drawing pass asks for comes first; every
+  other one is handed to the same thread once by `App::prefetch_art`, so
+  a cover is decoded whether or not its row was ever painted, and only
+  the drawn ones make the window repaint. A key that was decoded once
+  stays decoded (up to `KEPT`, past which the one left alone longest
+  goes), so scrolling back over it costs nothing. eframe pulls `image` in
+  on its own, so the crate is still in the tree; the app does not use it.
 - A file's own art wins. Failing that, `library.rs` looks beside the
   tracks: the conventional names first, then an image named after
   `cover`, `front`, `folder` or `album`, then the only image there. A
@@ -401,15 +410,28 @@ Platform notes:
   starts a scan again.
 - The scan result is cached under the user's cache directory:
   `library-<hash>.toml` holds the tags, one file per music directory so
-  two of them keep a cache each, `covers/` holds the decoded art, named
-  by a hash of its pixels, `art/` holds those same covers as the PNGs
-  MPRIS names to a media widget, and `waveforms/` holds the peak
-  envelopes the seek bar draws. Decoding art is what made a scan slow
-  (about 4.6 s of 6.2 s on seven thousand tracks), so the cache is what
-  makes a start quick; a start shows the cached library and scans behind
-  it. An entry is used only while the file's size and modification time
-  match, so a retagged file is read again. Bump `cache::VERSION` when the
-  stored shape changes, or an older file will be misread.
+  two of them keep a cache each, `covers/` holds each picture as the
+  image file it was found in, named by a hash of its bytes, `art/` holds
+  those same covers as the PNGs MPRIS names to a media widget, and
+  `waveforms/` holds the peak envelopes the seek bar draws. Decoding art
+  is what made a scan slow (about 6.4 s of 6.5 s on eight thousand
+  tracks), so no scan and no cache read decodes a picture: they only
+  record the key of one. A scan of a large directory therefore takes
+  well under a second. `src/art.rs` holds the thread that does decode,
+  an `Art` per window, with two queues: the pictures the frame asked for
+  are decoded first, and everything else is handed over once by
+  `App::prefetch_art` and decoded behind them, so a cover is ready
+  whether or not its row is ever on screen. Both queues feed the same
+  thread, and only a picture the frame asked for makes the window
+  repaint, so the background work costs no frames. At most `KEPT` decoded
+  pictures are held; the least recently drawn is dropped and may be
+  decoded again later. `decode_now` is the blocking path MPRIS art uses. `read_cache` takes the cache at its word rather than checking
+  every file against the disk, which would cost one `stat` per track; the
+  scan behind the window is what reads a changed file again and rewrites
+  the cache. An entry is used by a scan only while the file's size and
+  modification time match, so a retagged file is read again. Bump
+  `cache::VERSION` when the stored shape changes, or an older file will
+  be misread.
 - Settings live in `config.toml` under the user's config directory.
   Playlists are stored there by file path, not by library index, because
   the library is rescanned at every start. They are written as they
@@ -431,7 +453,10 @@ Platform notes:
   demand and would otherwise not notice until the mouse moved.
 - The art a desktop's media widget shows is named by `mpris:artUrl`, a
   `file://` URI, so the playing track's cover is written out as a PNG
-  under `art/` in the cache, named by the hash of its pixels.
+  under `art/` in the cache, named after the key its picture is stored
+  under. The pixels come from the window's decoded pictures when it has
+  them, and are decoded on the spot for a track that plays without being
+  drawn.
   `cache::art_file` writes it once per cover, `cover::to_png` encodes it,
   and `App::art` keeps the file for as long as that track plays: a frame
   that encoded it again would cost more than drawing the window. Starting

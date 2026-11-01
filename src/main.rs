@@ -4,6 +4,7 @@
 
 mod abx;
 mod app;
+mod art;
 mod cache;
 mod cli;
 mod config;

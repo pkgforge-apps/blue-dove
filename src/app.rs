@@ -188,9 +188,14 @@ pub struct App {
     /// multiplications, which the drawing pass would otherwise do every
     /// frame; they only change with the track, the width or the layout.
     pub(crate) wave_columns: Option<(usize, u32, usize, Vec<f32>)>,
-    /// Textures for covers, keyed by the album index or, for a track that
-    /// belongs to no album, by its track index offset past the albums.
-    pub(crate) textures: HashMap<usize, egui::TextureHandle>,
+    /// Textures for covers, keyed by the key their picture is stored under.
+    pub(crate) textures: HashMap<String, egui::TextureHandle>,
+    /// Pictures decoded off the drawing thread.
+    ///
+    /// A start decodes none of them: the window asks for the ones it is about
+    /// to draw and gets them a frame or two later, so a library of thousands
+    /// of tracks opens as fast as a small one.
+    pub(crate) pictures: crate::art::Art,
     /// The audio device, opened when the first track plays.
     pub(crate) audio: Option<Audio>,
     /// Index of the playing track.
@@ -278,6 +283,12 @@ pub struct App {
     /// than taken from the library, so a file anywhere plays: a file manager
     /// hands over paths that need not be under the music directory.
     pub(crate) preview: Option<Track>,
+    /// Whether every picture in the library has been handed to the thread.
+    ///
+    /// The drawing pass asks for what it shows; this fills in the rest, one
+    /// queue at a time, so scrolling finds the art already decoded. It is set
+    /// once, when a library is taken in.
+    prefetched: bool,
     /// Whether the previewed file carried art, which sets the window's height.
     ///
     /// A file with no cover draws no square, so its window is only as tall as
@@ -375,6 +386,7 @@ impl App {
             peaks: Vec::new(),
             wave_columns: None,
             textures: HashMap::new(),
+            pictures: crate::art::Art::default(),
             audio: None,
             playing: None,
             length: Duration::ZERO,
@@ -405,6 +417,7 @@ impl App {
             cover_fit,
             preview_enabled,
             preview: None,
+            prefetched: false,
             preview_art: false,
             quitting: false,
             abx: None,
@@ -832,10 +845,19 @@ impl App {
             }
         }
 
+        self.prefetch_art();
+        if self.pictures.poll() {
+            ctx.request_repaint();
+        }
+
         // A path given at startup could not be found until the scan landed.
         self.open_pending_paths(ctx);
 
-        if self.scan.is_some() || self.waveform.is_some() || self.picker.is_some() {
+        if self.scan.is_some()
+            || self.waveform.is_some()
+            || self.picker.is_some()
+            || self.pictures.pending()
+        {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
@@ -1521,14 +1543,85 @@ impl App {
         self.view.reveal = true;
     }
 
-    /// Texture for an album's cover, uploading it on first use.
-    pub fn cover_texture(
+    /// Texture for the cover stored under `key`, uploading it once decoded.
+    ///
+    /// A picture the thread has not decoded yet is asked for and answers
+    /// `None`, which the caller draws as a placeholder; the frame after it
+    /// arrives draws the art. A key with no picture behind it is remembered as
+    /// such by [`crate::art::Art`], so a cache that lost one is not asked for
+    /// it again.
+    pub fn cover_texture(&mut self, ctx: &egui::Context, key: &str) -> Option<egui::TextureHandle> {
+        if let Some(texture) = self.textures.get(key) {
+            return Some(texture.clone());
+        }
+        let Some(cover) = self.pictures.decoded(key) else {
+            self.pictures.request(key);
+            return None;
+        };
+        let cover = cover?;
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([cover.width, cover.height], &cover.rgba);
+        let texture = ctx.load_texture(format!("cover-{key}"), image, egui::TextureOptions::LINEAR);
+        self.textures.insert(key.to_string(), texture.clone());
+        Some(texture)
+    }
+
+    /// Hands the pictures of the whole library to the thread.
+    ///
+    /// This is what makes art appear everywhere rather than only where the
+    /// window was scrolled: the drawing pass still asks for what it shows
+    /// first, and the rest is decoded behind it. The first call after a
+    /// library lands does the work, so a start never pays for it twice.
+    pub fn prefetch_art(&mut self) {
+        if self.prefetched {
+            return;
+        }
+        self.prefetched = true;
+        let keys = self
+            .library
+            .albums
+            .iter()
+            .filter_map(|album| album.cover.clone())
+            .chain(
+                self.library
+                    .tracks
+                    .iter()
+                    .filter_map(|track| track.cover.clone()),
+            );
+        self.pictures.prefetch(keys);
+    }
+
+    /// Texture for an album's cover.
+    pub fn album_cover(
         &mut self,
         ctx: &egui::Context,
         album: usize,
     ) -> Option<egui::TextureHandle> {
-        let cover = self.library.albums.get(album)?.cover.clone()?;
-        self.upload_cover(ctx, album, &cover)
+        let key = self.library.albums.get(album)?.cover.clone()?;
+        self.cover_texture(ctx, &key)
+    }
+
+    /// Whether the playing track has a picture, decoded or not.
+    ///
+    /// The layout picks its size from this rather than from the texture: the
+    /// picture arrives a frame or two after it is asked for, and a window
+    /// that sized itself in the meantime would snap to the no-art size and
+    /// keep it.
+    pub fn playing_has_art(&self) -> bool {
+        if let Some(preview) = &self.preview {
+            return preview.cover.is_some();
+        }
+        self.playing.is_some_and(|track| {
+            self.album_of(track)
+                .and_then(|album| self.library.albums.get(album))
+                .and_then(|album| album.cover.as_ref())
+                .is_some()
+                || self
+                    .library
+                    .tracks
+                    .get(track)
+                    .is_some_and(|track| track.cover.is_some())
+        })
     }
 
     /// Texture for the cover of the playing track.
@@ -1538,32 +1631,15 @@ impl App {
     /// same cache under different keys.
     pub fn playing_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         if let Some(preview) = &self.preview {
-            let cover = preview.cover.clone()?;
-            return self.upload_cover(ctx, usize::MAX, &cover);
+            let key = preview.cover.clone()?;
+            return self.cover_texture(ctx, &key);
         }
         let track = self.playing?;
         if let Some(album) = self.album_of(track) {
-            return self.cover_texture(ctx, album);
+            return self.album_cover(ctx, album);
         }
-        let cover = self.library.tracks.get(track)?.cover.clone()?;
-        self.upload_cover(ctx, usize::MAX - track, &cover)
-    }
-
-    /// Uploads `cover` and caches it under `key`.
-    fn upload_cover(
-        &mut self,
-        ctx: &egui::Context,
-        key: usize,
-        cover: &crate::library::Cover,
-    ) -> Option<egui::TextureHandle> {
-        if let Some(texture) = self.textures.get(&key) {
-            return Some(texture.clone());
-        }
-        let image =
-            egui::ColorImage::from_rgba_unmultiplied([cover.width, cover.height], &cover.rgba);
-        let texture = ctx.load_texture(format!("cover-{key}"), image, egui::TextureOptions::LINEAR);
-        self.textures.insert(key, texture.clone());
-        Some(texture)
+        let key = self.library.tracks.get(track)?.cover.clone()?;
+        self.cover_texture(ctx, &key)
     }
 
     /// The playback position, following the seek bar while it is dragged.
@@ -1804,6 +1880,8 @@ impl App {
 
         self.library = library;
         self.textures.clear();
+        self.pictures = crate::art::Art::default();
+        self.prefetched = false;
         self.view.album = (!self.library.albums.is_empty()).then_some(0);
 
         if vanished {
@@ -1917,7 +1995,7 @@ impl App {
             // controls and the waveform would be squeezed out of a window
             // that has no room for them. The ceiling is lifted so growing
             // back past the break returns to the full layout.
-            let size = if self.playing_cover(ctx).is_some() {
+            let size = if self.playing_has_art() {
                 COMPACT_SIZE
             } else {
                 COMPACT_NO_ART_SIZE
@@ -2212,11 +2290,22 @@ impl App {
             Some(Some(path)) if path.is_file() => return Some(path.clone()),
             _ => {}
         }
-        let cover = self
+        let key = self
             .playing
             .and_then(|index| self.library.tracks.get(index))
             .and_then(|track| track.cover.clone());
-        let path = cover.as_deref().and_then(crate::cache::art_file);
+        // The picture is usually on screen already, so it is taken from there;
+        // a track that plays without being drawn is decoded here instead.
+        let cover = key
+            .as_deref()
+            .and_then(|key| match self.pictures.decoded(key) {
+                Some(cover) => cover,
+                None => crate::art::decode_now(key).map(std::sync::Arc::new),
+            });
+        let path = match (key.as_deref(), cover.as_deref()) {
+            (Some(key), Some(cover)) => crate::cache::art_file(key, cover),
+            _ => None,
+        };
         self.art = Some(path.clone());
         path
     }

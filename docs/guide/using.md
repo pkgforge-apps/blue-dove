@@ -457,6 +457,9 @@ again on the next start.
 
 The library cache and the waveforms are separate, and live under the
 platform's cache directory: `library-<hash>.toml` holds the tags, `covers/`
-the decoded album art, `art/` the same art as the PNGs a desktop's media
-widget shows, and `waveforms/` the peak envelopes. Deleting that directory
-is safe at any time; the next start reads the files again.
+the album art as it was found in each file, `art/` the same art as the PNGs
+a desktop's media widget shows, and `waveforms/` the peak envelopes. Art is
+decoded behind the window rather than before it opens, so a library of
+thousands of tracks opens at once; the covers on screen are decoded first,
+and the rest follow in the background. Deleting that directory is safe at
+any time; the next start reads the files again.

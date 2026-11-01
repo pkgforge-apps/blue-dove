@@ -740,8 +740,9 @@ impl App {
         // The preview's window is a fixed size chosen when it opened, so it
         // is `preview_art` that decides, not whatever texture arrives now: a
         // cover that failed to load would otherwise collapse the layout inside
-        // a window that cannot shrink to match.
-        if texture.is_none() || (self.preview.is_some() && !self.preview_art) {
+        // a window that cannot shrink to match. A picture that is still being
+        // decoded keeps its square, so the layout does not jump when it lands.
+        if !self.playing_has_art() || (self.preview.is_some() && !self.preview_art) {
             self.name_and_controls(ui, compact);
             return;
         }
@@ -834,7 +835,7 @@ impl App {
     fn name_and_controls(&mut self, ui: &mut egui::Ui, compact: bool) {
         if compact {
             let response = self.compact_name(ui);
-            if self.playing_cover(ui.ctx()).is_none() {
+            if !self.playing_has_art() {
                 response.context_menu(|ui| self.art_menu(ui));
             }
         }
@@ -1197,7 +1198,7 @@ impl App {
                         let rect = row_rect(origin, tops[row], width, rows[row].height());
                         let index = match rows[row] {
                             TableRow::Album(album) => {
-                                let texture = self.cover_texture(ui.ctx(), album);
+                                let texture = self.album_cover(ui.ctx(), album);
                                 if let Some(entry) = self.library.albums.get(album) {
                                     album_heading(ui, rect, entry, texture.as_ref());
                                 }
@@ -1731,7 +1732,7 @@ impl App {
         actions: &mut Vec<RowAction>,
     ) {
         let indent = 2.0 + depth as f32 * TREE_STEP + ALBUM_INDENT;
-        let texture = self.cover_texture(ui.ctx(), index);
+        let texture = self.album_cover(ui.ctx(), index);
         let Some(album) = self.library.albums.get(index) else {
             return;
         };
