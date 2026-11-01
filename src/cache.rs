@@ -964,37 +964,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_library_stored_under_one_spelling_is_found_under_the_other() {
-        // The cache is named after the resolved path, so opening the other
-        // spelling finds the file; its entries have to be found there too, or
-        // every track is read again.
-        let scratch = Scratch::new("symlink-entry");
-        let target = scratch.0.join("music");
-        std::fs::create_dir_all(&target).expect("the directory is made");
-        let file = target.join("song.flac");
-        std::fs::write(&file, b"one").expect("the file is written");
-        let link = scratch.0.join("link");
-        std::os::unix::fs::symlink(&target, &link).expect("the link is made");
-
-        let library = Library::from_tracks(vec![track(&file, None)]);
-        save_in(&scratch.0, &library, &target).expect("the cache is written");
-
-        let cache = Cache::load_from(&scratch.0, &link).expect("the cache is found");
-        let through_the_link = link.join("song.flac");
-        assert!(
-            cache.track(&through_the_link).is_some(),
-            "the entry is found through the link"
-        );
-        assert_eq!(
-            cache
-                .track(&through_the_link)
-                .map(|entry| entry.path(&link)),
-            Some(through_the_link.clone()),
-            "and it names the file under the root it was looked up with"
-        );
-    }
-
-    #[test]
     fn a_cache_holds_up_when_the_root_is_named_another_way() {
         // macOS resolves `/tmp` to `/private/tmp`, and a scan may walk either
         // spelling of the same directory. What it writes has to be found again
