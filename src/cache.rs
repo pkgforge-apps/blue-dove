@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -224,13 +225,18 @@ fn cache_dir() -> Option<PathBuf> {
     {
         // A test must not read or write the cache of the person running it:
         // a scan writes there, and a scan of a temporary directory would put
-        // an entry, and its pictures, beside the real library. The test
-        // directory sits in `target/`, so it goes with `cargo clean` rather
-        // than piling up in the system temporary directory.
+        // an entry, and its pictures, beside the real library.
+        //
+        // The directory sits in `target/`, so it goes with `cargo clean`
+        // rather than piling up in `/tmp`. The tests run in parallel and write
+        // to it, so `save` leaves pruning to `save_in`, which a test points at
+        // a directory of its own: a prune against the whole test cache would
+        // delete the pictures another test had just stored.
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
-                .join("test-cache"),
+                .join("test-cache")
+                .join(std::process::id().to_string()),
         )
     }
     #[cfg(not(test))]
@@ -248,11 +254,26 @@ pub fn save(library: &Library, root: &Path) -> Result<(), String> {
     let Some(dir) = cache_dir() else {
         return Err("no cache directory for this user".to_string());
     };
+    #[cfg(test)]
+    {
+        // A test's library and a test's pictures are stored in the same
+        // directory as every other test's; pruning there would delete art
+        // another test is about to read. `save_in` still prunes.
+        write(&dir, library, root)
+    }
+    #[cfg(not(test))]
     save_in(&dir, library, root)
 }
 
 /// Writes `library` as the cache kept in `dir`.
 pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
+    write(dir, library, root)?;
+    prune_covers(dir);
+    Ok(())
+}
+
+/// Writes `library` as the cache kept in `dir`, and prunes nothing.
+fn write(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
     let path = dir.join(file_name(root));
     let mut tracks = Vec::with_capacity(library.tracks.len());
     for track in &library.tracks {
@@ -289,8 +310,6 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
         std::fs::create_dir_all(parent).at(parent)?;
     }
     write_atomically(&path, text).at(&path)?;
-
-    prune_covers(dir);
     Ok(())
 }
 
@@ -531,11 +550,21 @@ fn stamp(path: &Path) -> Option<(u64, u64)> {
 /// Writes `bytes` to `path`, through a temporary file beside it.
 ///
 /// A half-written file would be read back as a corrupt one, so the bytes land
-/// in a temporary name first and are moved into place in one step.
+/// in a temporary name first and are moved into place in one step. The name
+/// carries the thread and a counter, since two writers of the same file in one
+/// process would otherwise use the same temporary one and lose each other's
+/// bytes.
 fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let temporary = path.with_extension("new");
+    let temporary = path.with_extension(format!("{}-{:?}.new", serial(), thread::current().id()));
     std::fs::write(&temporary, bytes)?;
     std::fs::rename(&temporary, path)
+}
+
+/// A number no other call in the process gets, for naming a temporary file.
+fn serial() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// FNV-1a over `bytes`, used to name a cache file.

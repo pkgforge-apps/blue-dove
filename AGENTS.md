@@ -431,8 +431,11 @@ Platform notes:
   picture the frame asked for makes the window repaint, and `pending` is
   true only while such a picture is outstanding, so the work behind it
   costs no frames. At most `KEPT` decoded pictures are held; the one
-  decoded longest ago is dropped and may be decoded again later.
-  `decode_now` is the blocking path MPRIS art uses. A library that lands
+  decoded longest ago is dropped and may be decoded again later; the key is
+  dropped from the thread's memory of what it decoded too (`Art::forget`),
+  or the ask for it again would be swallowed and the window would wait for a
+  picture nobody sends. `retain`, `forget_missing` and the eviction all go
+  through it. `decode_now` is the blocking path MPRIS art uses. A library that lands
   keeps the pictures and textures `Library::covers()` still names, which
   a rescan over the same album usually does, and forgets the keys that
   answered with no picture, so one stored since is asked for again.
@@ -453,8 +456,11 @@ Platform notes:
   directory safe, since the scan then reads the files that named the
   missing pictures and stores them again. Bump `cache::VERSION` when the
   stored shape changes, or an older file will be misread. Under
-  `cfg(test)` the cache directory is `target/test-cache`, so a test scan
-  never writes beside the real library.
+  `cfg(test)` the cache directory is `target/test-cache/<pid>`, so a test
+  scan never writes beside the real library, and `save` there does not prune
+  because the tests share that directory: a prune would delete pictures
+  another test stored. A temporary file is named with the thread and a
+  counter, so two writers of one file cannot lose each other's bytes.
 - Settings live in `config.toml` under the user's config directory.
   Playlists are stored there by file path, not by library index, because
   the library is rescanned at every start. They are written as they

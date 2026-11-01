@@ -53,6 +53,8 @@ enum Request {
     Drawn(String),
     /// Pictures to decode behind the frames, in the order given.
     Bulk(Vec<String>),
+    /// Keys the window forgot, so the thread decodes them again when asked.
+    Forget(Vec<String>),
 }
 
 /// The queues to the thread that decodes pictures.
@@ -144,10 +146,13 @@ impl Art {
     /// so keeping those saves decoding them again and re-uploading them as
     /// textures, while the ones the old library had go.
     pub fn retain(&mut self, keep: &HashSet<String>) {
-        self.decoded.retain(|key, _| keep.contains(key));
-        self.order.retain(|key| keep.contains(key));
-        self.asked.retain(|key| keep.contains(key));
-        self.drawn.retain(|key| keep.contains(key));
+        let dropped: Vec<String> = self
+            .decoded
+            .keys()
+            .filter(|key| !keep.contains(*key))
+            .cloned()
+            .collect();
+        self.forget(&dropped);
     }
 
     /// Forgets the keys that answered with no picture.
@@ -156,23 +161,45 @@ impl Art {
     /// cache may have been stored since, and an answer held from before it
     /// would leave the window drawing a placeholder for it.
     pub fn forget_missing(&mut self) {
-        self.decoded.retain(|_, cover| cover.is_some());
+        let missing: Vec<String> = self
+            .decoded
+            .iter()
+            .filter(|(_, cover)| cover.is_none())
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.forget(&missing);
+    }
+
+    /// Drops `keys` here and in the thread, so asking for one decodes it again.
+    ///
+    /// The thread remembers what it has decoded too. Leaving a key there while
+    /// dropping it here would swallow the next ask for it, which is what a
+    /// picture evicted for room and asked for again runs into.
+    fn forget(&mut self, keys: &[String]) {
+        for key in keys {
+            self.decoded.remove(key);
+            self.asked.remove(key);
+            self.drawn.remove(key);
+        }
         self.order.retain(|key| self.decoded.contains_key(key));
-        self.asked.retain(|key| self.decoded.contains_key(key));
+        if keys.is_empty() {
+            return;
+        }
+        if let Some(worker) = &self.worker {
+            let _ = worker.wanted.send(Request::Forget(keys.to_vec()));
+        }
     }
 
     /// Drops the pictures decoded longest ago once too many are kept.
     fn make_room(&mut self) {
-        while self.decoded.len() > KEPT {
-            let Some(key) = self.order.pop_front() else {
-                return;
-            };
-            self.decoded.remove(&key);
-            // The key may be asked for again, and this time it is worth
-            // decoding: what dropped it was room, not a missing picture.
-            self.asked.remove(&key);
-            self.drawn.remove(&key);
+        let excess = self.decoded.len().saturating_sub(KEPT);
+        if excess == 0 {
+            return;
         }
+        let dropped: Vec<String> = self.order.drain(..excess.min(self.order.len())).collect();
+        // The keys may be asked for again, and this time they are worth
+        // decoding: what dropped them was room, not a missing picture.
+        self.forget(&dropped);
     }
 }
 
@@ -186,13 +213,11 @@ impl Worker {
             let mut done: HashSet<String> = HashSet::new();
             loop {
                 match queue.try_recv() {
-                    Ok(Request::Drawn(key)) => decode(key, &mut done, &sender),
-                    Ok(Request::Bulk(keys)) => backlog.extend(keys),
+                    Ok(request) => handle(request, &mut backlog, &mut done, &sender),
                     Err(TryRecvError::Empty) => match backlog.pop_front() {
                         Some(key) => decode(key, &mut done, &sender),
                         None => match queue.recv() {
-                            Ok(Request::Drawn(key)) => decode(key, &mut done, &sender),
-                            Ok(Request::Bulk(keys)) => backlog.extend(keys),
+                            Ok(request) => handle(request, &mut backlog, &mut done, &sender),
                             Err(_) => return,
                         },
                     },
@@ -204,10 +229,34 @@ impl Worker {
     }
 }
 
+/// Carries out one request from the window.
+fn handle(
+    request: Request,
+    backlog: &mut VecDeque<String>,
+    done: &mut HashSet<String>,
+    sender: &Sender<(String, Option<Arc<Cover>>)>,
+) {
+    match request {
+        Request::Drawn(key) => {
+            // The bulk list may still hold it from a prefetch; a drawn key is
+            // decoded now, so it is taken out rather than decoded twice.
+            backlog.retain(|queued| *queued != key);
+            decode(key, done, sender);
+        }
+        Request::Bulk(keys) => backlog.extend(keys),
+        Request::Forget(keys) => {
+            for key in keys {
+                done.remove(&key);
+                backlog.retain(|queued| *queued != key);
+            }
+        }
+    }
+}
+
 /// Decodes `key` and sends the answer on, unless it was decoded already.
 ///
-/// A key can be asked for twice, drawn and prefetched, and this is what keeps
-/// the second ask from decoding the picture again.
+/// The window asks for a picture on every frame until it arrives, so this is
+/// what keeps that from decoding it once per frame.
 fn decode(key: String, done: &mut HashSet<String>, sender: &Sender<(String, Option<Arc<Cover>>)>) {
     if !done.insert(key.clone()) {
         return;
@@ -241,12 +290,12 @@ mod tests {
         }
     }
 
-    /// A stored picture of a flat colour, and the key it went under.
-    fn stored(shade: u8) -> String {
+    /// A stored picture that differs from every other, and its key.
+    fn stored(n: usize) -> String {
         let cover = Cover {
             width: 4,
             height: 4,
-            rgba: [shade, shade, shade, 255].repeat(16),
+            rgba: [n as u8, (n >> 8) as u8, (n >> 16) as u8, 255].repeat(16),
         };
         let bytes = crate::cover::to_png(&cover).expect("the picture encodes");
         crate::cache::store_cover(&bytes).expect("the picture is stored")
@@ -396,5 +445,34 @@ mod tests {
             !art.asked.contains("0000000000000000-0"),
             "a dropped key may be decoded again"
         );
+    }
+
+    #[test]
+    fn a_picture_evicted_for_room_is_decoded_again_when_asked() {
+        // The thread remembers what it decoded, so a key dropped here has to
+        // be dropped there too: otherwise the ask is swallowed, the window
+        // waits for a picture nobody sends, and it repaints for good.
+        let keys: Vec<String> = (0..=KEPT).map(stored).collect();
+        let mut art = Art::default();
+        art.prefetch(keys.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while art.decoded.len() < KEPT + 1 && Instant::now() < deadline {
+            art.poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let first = keys[0].clone();
+        assert!(
+            art.decoded(&first).is_none(),
+            "the first picture was evicted for room"
+        );
+
+        art.request(&first);
+        settle(&mut art, &first);
+
+        assert!(
+            art.decoded(&first).is_some_and(|cover| cover.is_some()),
+            "the evicted picture is decoded again"
+        );
+        assert!(!art.pending(), "and the window stops waiting for it");
     }
 }
