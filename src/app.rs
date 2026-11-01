@@ -283,12 +283,6 @@ pub struct App {
     /// than taken from the library, so a file anywhere plays: a file manager
     /// hands over paths that need not be under the music directory.
     pub(crate) preview: Option<Track>,
-    /// Whether every picture in the library has been handed to the thread.
-    ///
-    /// The drawing pass asks for what it shows; this fills in the rest, one
-    /// queue at a time, so scrolling finds the art already decoded. It is set
-    /// once, when a library is taken in.
-    prefetched: bool,
     /// Whether the previewed file carried art, which sets the window's height.
     ///
     /// A file with no cover draws no square, so its window is only as tall as
@@ -417,7 +411,6 @@ impl App {
             cover_fit,
             preview_enabled,
             preview: None,
-            prefetched: false,
             preview_art: false,
             quitting: false,
             abx: None,
@@ -845,7 +838,6 @@ impl App {
             }
         }
 
-        self.prefetch_art();
         if self.pictures.poll() {
             ctx.request_repaint();
         }
@@ -1566,31 +1558,6 @@ impl App {
         Some(texture)
     }
 
-    /// Hands the pictures of the whole library to the thread.
-    ///
-    /// This is what makes art appear everywhere rather than only where the
-    /// window was scrolled: the drawing pass still asks for what it shows
-    /// first, and the rest is decoded behind it. The first call after a
-    /// library lands does the work, so a start never pays for it twice.
-    pub fn prefetch_art(&mut self) {
-        if self.prefetched {
-            return;
-        }
-        self.prefetched = true;
-        let keys = self
-            .library
-            .albums
-            .iter()
-            .filter_map(|album| album.cover.clone())
-            .chain(
-                self.library
-                    .tracks
-                    .iter()
-                    .filter_map(|track| track.cover.clone()),
-            );
-        self.pictures.prefetch(keys);
-    }
-
     /// Texture for an album's cover.
     pub fn album_cover(
         &mut self,
@@ -1881,7 +1848,7 @@ impl App {
         self.library = library;
         self.textures.clear();
         self.pictures = crate::art::Art::default();
-        self.prefetched = false;
+        self.pictures.prefetch(self.library.covers());
         self.view.album = (!self.library.albums.is_empty()).then_some(0);
 
         if vanished {

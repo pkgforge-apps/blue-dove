@@ -4,7 +4,7 @@
 //! large directory never blocks the UI.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -261,6 +261,31 @@ impl Library {
     /// queues it in the order it is drawn.
     pub fn tracks_deep(&self) -> Vec<usize> {
         self.root.tracks_deep(&self.albums)
+    }
+
+    /// The key of every picture the library holds, in the order it is drawn.
+    ///
+    /// The album list comes first, then the loose files, so the pictures the
+    /// window is about to show head the queue and the rest follow. A key two
+    /// albums share is named once.
+    pub fn covers(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for album in &self.albums {
+            if let Some(key) = &album.cover
+                && seen.insert(key.clone())
+            {
+                keys.push(key.clone());
+            }
+        }
+        for track in &self.tracks {
+            if let Some(key) = &track.cover
+                && seen.insert(key.clone())
+            {
+                keys.push(key.clone());
+            }
+        }
+        keys
     }
 
     /// The album each track belongs to, by track index.

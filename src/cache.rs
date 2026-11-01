@@ -101,8 +101,16 @@ impl Cache {
     }
 
     /// Reads the cache in `dir` for `root`.
+    ///
+    /// Answers `None` when `root` is not a directory any more: an unmounted
+    /// drive or a removed folder would otherwise open as a library of tracks
+    /// that cannot be played.
     pub fn load_from(dir: &Path, root: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(dir.join(file_name(root))).ok()?;
+        if !root.is_dir() {
+            return None;
+        }
+        let root = cache_root(root);
+        let text = std::fs::read_to_string(dir.join(file_name(&root))).ok()?;
         let mut cache: Self = toml::from_str(&text).ok()?;
         if cache.version != VERSION || cache.root != root {
             return None;
@@ -152,6 +160,15 @@ impl CachedTrack {
     }
 }
 
+/// The path a music directory's cache is named after.
+///
+/// A symlink and the directory it points at are one place, and one place keeps
+/// one cache: the path is resolved first, so either spelling of it finds the
+/// entry the other wrote. A path that cannot be resolved is used as it is.
+fn cache_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
 /// Name of the file the library for `root` is written to.
 ///
 /// One directory keeps one file: two music directories would otherwise
@@ -159,13 +176,23 @@ impl CachedTrack {
 /// away every time. The name is a hash of the path, so it is stable between
 /// runs without carrying a path into a file name.
 fn file_name(root: &Path) -> String {
-    let hash = digest(root.as_os_str().as_encoded_bytes());
+    let hash = digest(cache_root(root).as_os_str().as_encoded_bytes());
     format!("library-{hash:016x}.toml")
 }
 
 /// The directory the cache is kept in, when the platform has a cache directory.
 fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|dir| dir.join("blue-dove"))
+    #[cfg(test)]
+    {
+        // A test must not read or write the cache of the person running it:
+        // a scan writes there, and a scan of a temporary directory would put
+        // an entry, and its pictures, beside the real library.
+        Some(std::env::temp_dir().join(format!("blue-dove-cache-{}", std::process::id())))
+    }
+    #[cfg(not(test))]
+    {
+        dirs::cache_dir().map(|dir| dir.join("blue-dove"))
+    }
 }
 
 /// Writes `library` as the cache for `root`.
@@ -208,7 +235,7 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
 
     let cache = Cache {
         version: VERSION,
-        root: root.to_path_buf(),
+        root: cache_root(root),
         by_path: HashMap::new(),
         tracks,
     };
@@ -223,16 +250,37 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Removes the stored covers no track refers to any more.
+/// Removes the stored covers no library refers to any more.
 ///
 /// The `art` directory holds the same covers as PNGs, for the media widget
 /// MPRIS names them to, so it is pruned by the same rule: a file named after
-/// a key the library still uses stays.
+/// a key some library still uses stays.
+///
+/// The keys come from every library cache in `dir`, not just the one being
+/// written: the two directories are shared by all of them, so pruning against
+/// one root's tracks would delete the art of a second music directory.
 fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
-    let keep: HashSet<&str> = tracks
+    let mut keep: HashSet<String> = tracks
         .iter()
-        .filter_map(|track| track.cover.as_deref())
+        .filter_map(|track| track.cover.clone())
         .collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("library-") || !name.ends_with(".toml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(cache) = toml::from_str::<Cache>(&text) else {
+            continue;
+        };
+        keep.extend(cache.tracks.into_iter().filter_map(|track| track.cover));
+    }
     for name in ["covers", "art"] {
         let Ok(entries) = std::fs::read_dir(dir.join(name)) else {
             continue;
@@ -731,6 +779,94 @@ mod tests {
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(left, 0, "the art nobody refers to is gone");
+    }
+
+    /// A second picture, so two covers can be told apart.
+    fn other_picture() -> Vec<u8> {
+        crate::cover::to_png(&Cover {
+            width: 2,
+            height: 2,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
+        })
+        .expect("the picture encodes")
+    }
+
+    #[test]
+    fn pruning_keeps_the_covers_of_another_library() {
+        // `covers/` and `art/` are shared by every music directory's cache,
+        // so pruning against one library's tracks deleted the other's art.
+        let scratch = Scratch::new("shared-prune");
+        let mut keys = Vec::new();
+        for (name, picture) in [("first", picture()), ("second", other_picture())] {
+            let root = scratch.0.join(name);
+            std::fs::create_dir_all(&root).expect("the directory is made");
+            let file = root.join("song.flac");
+            std::fs::write(&file, b"one").expect("the file is written");
+            let key = store_cover_in(&scratch.0, &picture).expect("the picture is stored");
+            let library = Library::from_tracks(vec![track(&file, Some(key.clone()))]);
+            save_in(&scratch.0, &library, &root).expect("the cache is written");
+            keys.push(key);
+        }
+
+        let first = Library::from_tracks(vec![track(
+            &scratch.0.join("first").join("song.flac"),
+            Some(keys[0].clone()),
+        )]);
+        save_in(&scratch.0, &first, &scratch.0.join("first")).expect("the cache is written again");
+
+        for key in keys {
+            assert!(
+                scratch.0.join("covers").join(&key).is_file(),
+                "a cover another library uses stays"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_that_is_gone_is_no_library() {
+        // An unmounted drive leaves the cache behind; opening it would list
+        // tracks that cannot be played.
+        let scratch = Scratch::new("gone");
+        let root = scratch.0.join("music");
+        std::fs::create_dir_all(&root).expect("the directory is made");
+        let file = root.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &root).expect("the cache is written");
+        assert!(Cache::load_from(&scratch.0, &root).is_some());
+
+        std::fs::remove_dir_all(&root).expect("the directory goes");
+
+        assert!(
+            Cache::load_from(&scratch.0, &root).is_none(),
+            "the cache is not read for a directory that is gone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_its_target_keep_one_cache() {
+        // A music directory reached through a symlink and the directory it
+        // points at are one place, so naming it either way finds one cache.
+        let scratch = Scratch::new("symlink");
+        let target = scratch.0.join("music");
+        std::fs::create_dir_all(&target).expect("the directory is made");
+        let file = target.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("the link is made");
+
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &link).expect("the cache is written");
+
+        assert!(
+            Cache::load_from(&scratch.0, &target).is_some(),
+            "the target finds the cache the link wrote"
+        );
+        assert!(
+            Cache::load_from(&scratch.0, &link).is_some(),
+            "and the link finds it too"
+        );
     }
 
     #[test]

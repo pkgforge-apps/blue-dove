@@ -57,7 +57,7 @@ as Clementine, Strawberry and Elisa.
 - Adjusts the volume by dragging the slider or rolling the wheel over it.
 - Remembers the music directory, the volume, the window opacity and every
   open playlist between runs, so the next start shows the same tabs.
-- Caches the tags and the decoded album art, so a start on a large
+- Caches the tags and the album art as it found it, so a start on a large
   library opens at once and only re-reads the files that changed.
 - Shrinks into a compact popup of just the art, the controls and a thin
   waveform, for keeping in a corner while you work.
