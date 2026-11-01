@@ -1846,9 +1846,17 @@ impl App {
         let vanished = library.is_empty() && paths.iter().any(|tracks| !tracks.is_empty());
 
         self.library = library;
-        self.textures.clear();
-        self.pictures = crate::art::Art::default();
-        self.pictures.prefetch(self.library.covers());
+        // Textures and decoded pictures are keyed by the content of a cover,
+        // so a rescan that names the same ones keeps them: clearing both would
+        // blink the visible art back to placeholders and decode it again.
+        let covers = self.library.covers();
+        let named: HashSet<String> = covers.iter().cloned().collect();
+        self.textures.retain(|key, _| named.contains(key));
+        self.pictures.retain(&named);
+        // A key whose bytes were gone when it was last asked for may be there
+        // now, since the scan that produced this library stores what it finds.
+        self.pictures.forget_missing();
+        self.pictures.prefetch(covers);
         self.view.album = (!self.library.albums.is_empty()).then_some(0);
 
         if vanished {

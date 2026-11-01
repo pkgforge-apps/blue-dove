@@ -2,20 +2,22 @@
 //!
 //! A scan stores a cover's encoded bytes and keeps only the key it was stored
 //! under, so listing a library of thousands of tracks decodes no picture. One
-//! thread decodes them here instead, from a single queue worked in the order
-//! the keys were asked for: the picture the window is about to draw is queued
-//! ahead of the ones that follow it.
+//! thread decodes them here instead, taking two orders of work: a picture the
+//! window is about to draw, which is decoded next, and a bulk list of the rest,
+//! which is worked through behind the frames. The thread looks for drawn work
+//! before it touches the bulk, so a key the window asks for never waits behind
+//! a whole library.
 //!
 //! `Art::prefetch` queues the whole library when one lands, so a cover is
 //! decoded whether or not its row is ever on screen, and only a picture the
-//! window asked for makes it repaint. A key is queued once and its answer is
+//! window asked for makes it repaint. A key is decoded once and its answer is
 //! remembered, so a picture is decoded to be drawn or behind the frames but
 //! never twice.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
 use crate::cover::Cover;
@@ -33,22 +35,30 @@ pub struct Art {
     /// Pictures by key.
     ///
     /// `None` is a key with no picture behind it, which is remembered so the
-    /// key is not asked for again.
+    /// key is not asked for again until a library is taken in again.
     decoded: HashMap<String, Option<Arc<Cover>>>,
     /// The keys of those pictures, oldest first, so one can make room.
     order: VecDeque<String>,
-    /// Keys handed to the thread, so one is queued once.
+    /// Keys handed to the thread, so one is asked for once.
     asked: HashSet<String>,
-    /// The keys among those the window asked for, which it repaints for.
+    /// The keys among those the window is waiting to draw.
     drawn: HashSet<String>,
     /// The thread, started when the first key is asked for.
     worker: Option<Worker>,
 }
 
+/// What the window asks the thread for.
+enum Request {
+    /// A picture the window is about to draw, which is decoded next.
+    Drawn(String),
+    /// Pictures to decode behind the frames, in the order given.
+    Bulk(Vec<String>),
+}
+
 /// The queues to the thread that decodes pictures.
 struct Worker {
-    /// Keys to decode, in the order they were asked for.
-    wanted: Sender<String>,
+    /// What to decode.
+    wanted: Sender<Request>,
     /// Pictures that came back.
     results: Receiver<(String, Option<Arc<Cover>>)>,
 }
@@ -62,40 +72,41 @@ impl Art {
         self.decoded.get(key).cloned()
     }
 
-    /// Asks the thread for `key`, once.
+    /// Asks the thread for `key` ahead of the bulk list.
     ///
     /// A key asked for this way is one the window is about to draw, so its
-    /// arrival makes the window repaint; `prefetch` asks without that. A key
-    /// already queued by `prefetch` still counts as drawn here, or the window
-    /// would wait for a picture nothing repaints for.
+    /// arrival makes the window repaint, and it is decoded before anything
+    /// `prefetch` queued. A key already handed over by `prefetch` is asked for
+    /// again rather than left behind the whole library: the thread skips a key
+    /// it has already decoded, so that costs nothing.
     pub fn request(&mut self, key: &str) {
         if self.decoded.contains_key(key) {
             return;
         }
         self.drawn.insert(key.to_string());
-        self.queue(key);
+        self.asked.insert(key.to_string());
+        let worker = self.worker.get_or_insert_with(Worker::start);
+        let _ = worker.wanted.send(Request::Drawn(key.to_string()));
     }
 
-    /// Asks the thread for every key in `keys`.
+    /// Hands the thread every key the window is not showing, in one go.
     ///
-    /// This is what fills the pictures behind the visible rows: a key the
-    /// window asks for later is already queued or done, and one it never shows
-    /// is decoded anyway so a scroll finds it ready.
+    /// This is what fills the pictures behind the visible rows: the thread
+    /// works through them after whatever the window asks for, so a cover is
+    /// decoded whether or not its row is ever painted, and a scroll finds the
+    /// ones above it already done.
     pub fn prefetch(&mut self, keys: impl IntoIterator<Item = String>) {
+        let mut bulk = Vec::new();
         for key in keys {
-            self.queue(&key);
+            if !self.decoded.contains_key(&key) && self.asked.insert(key.clone()) {
+                bulk.push(key);
+            }
         }
-    }
-
-    /// Hands `key` to the thread, once.
-    fn queue(&mut self, key: &str) {
-        if self.decoded.contains_key(key) || !self.asked.insert(key.to_string()) {
+        if bulk.is_empty() {
             return;
         }
         let worker = self.worker.get_or_insert_with(Worker::start);
-        // A closed queue is a thread that has ended, which only happens as the
-        // app shuts down; the key is then left undecoded rather than retried.
-        let _ = worker.wanted.send(key.to_string());
+        let _ = worker.wanted.send(Request::Bulk(bulk));
     }
 
     /// Takes in every picture that has come back.
@@ -119,9 +130,35 @@ impl Art {
         drawn
     }
 
-    /// Whether a picture is still being decoded.
+    /// Whether a picture the window is waiting to draw is still decoding.
+    ///
+    /// Work behind the visible rows is not counted: it costs no frames, and
+    /// arrives by the time the frame that draws it runs.
     pub fn pending(&self) -> bool {
-        self.decoded.len() < self.asked.len()
+        !self.drawn.is_empty()
+    }
+
+    /// Drops the pictures and keys of covers `keep` does not name.
+    ///
+    /// A library that is swapped in usually names most of the same pictures,
+    /// so keeping those saves decoding them again and re-uploading them as
+    /// textures, while the ones the old library had go.
+    pub fn retain(&mut self, keep: &HashSet<String>) {
+        self.decoded.retain(|key, _| keep.contains(key));
+        self.order.retain(|key| keep.contains(key));
+        self.asked.retain(|key| keep.contains(key));
+        self.drawn.retain(|key| keep.contains(key));
+    }
+
+    /// Forgets the keys that answered with no picture.
+    ///
+    /// A new library is the moment to ask again: art that was missing from the
+    /// cache may have been stored since, and an answer held from before it
+    /// would leave the window drawing a placeholder for it.
+    pub fn forget_missing(&mut self) {
+        self.decoded.retain(|_, cover| cover.is_some());
+        self.order.retain(|key| self.decoded.contains_key(key));
+        self.asked.retain(|key| self.decoded.contains_key(key));
     }
 
     /// Drops the pictures decoded longest ago once too many are kept.
@@ -142,18 +179,41 @@ impl Art {
 impl Worker {
     /// Starts the thread, which ends when the app drops its end of the queue.
     fn start() -> Self {
-        let (wanted, queue) = mpsc::channel::<String>();
+        let (wanted, queue) = mpsc::channel::<Request>();
         let (sender, results) = mpsc::channel();
         thread::spawn(move || {
-            for key in queue {
-                let cover = decode_now(&key).map(Arc::new);
-                if sender.send((key, cover)).is_err() {
-                    break;
+            let mut backlog: VecDeque<String> = VecDeque::new();
+            let mut done: HashSet<String> = HashSet::new();
+            loop {
+                match queue.try_recv() {
+                    Ok(Request::Drawn(key)) => decode(key, &mut done, &sender),
+                    Ok(Request::Bulk(keys)) => backlog.extend(keys),
+                    Err(TryRecvError::Empty) => match backlog.pop_front() {
+                        Some(key) => decode(key, &mut done, &sender),
+                        None => match queue.recv() {
+                            Ok(Request::Drawn(key)) => decode(key, &mut done, &sender),
+                            Ok(Request::Bulk(keys)) => backlog.extend(keys),
+                            Err(_) => return,
+                        },
+                    },
+                    Err(TryRecvError::Disconnected) => return,
                 }
             }
         });
         Self { wanted, results }
     }
+}
+
+/// Decodes `key` and sends the answer on, unless it was decoded already.
+///
+/// A key can be asked for twice, drawn and prefetched, and this is what keeps
+/// the second ask from decoding the picture again.
+fn decode(key: String, done: &mut HashSet<String>, sender: &Sender<(String, Option<Arc<Cover>>)>) {
+    if !done.insert(key.clone()) {
+        return;
+    }
+    let cover = decode_now(&key).map(Arc::new);
+    let _ = sender.send((key, cover));
 }
 
 /// Decodes the picture stored under `key`, on the calling thread.
@@ -181,6 +241,17 @@ mod tests {
         }
     }
 
+    /// A stored picture of a flat colour, and the key it went under.
+    fn stored(shade: u8) -> String {
+        let cover = Cover {
+            width: 4,
+            height: 4,
+            rgba: [shade, shade, shade, 255].repeat(16),
+        };
+        let bytes = crate::cover::to_png(&cover).expect("the picture encodes");
+        crate::cache::store_cover(&bytes).expect("the picture is stored")
+    }
+
     #[test]
     fn nothing_is_decoded_before_it_is_asked_for() {
         let art = Art::default();
@@ -206,68 +277,95 @@ mod tests {
     #[test]
     fn a_prefetched_key_is_answered_without_being_drawn() {
         let mut art = Art::default();
-        let key = "0000000000000000-0";
-        art.prefetch([key.to_string()]);
-        assert!(art.pending(), "the thread has a picture to decode");
-        settle(&mut art, key);
+        let key = stored(10);
+        art.prefetch([key.clone()]);
+        assert!(
+            !art.pending(),
+            "work the window is not waiting for costs it no frames"
+        );
+        settle(&mut art, &key);
 
         assert!(
-            art.decoded(key).is_some_and(|cover| cover.is_none()),
-            "a picture nobody drew is decoded too"
+            art.decoded(&key).is_some_and(|cover| cover.is_some()),
+            "decoded"
         );
         assert!(!art.pending(), "and the thread is idle again");
     }
 
     #[test]
-    fn a_key_queued_behind_the_frames_still_repaints_when_drawn() {
-        // A prefetched key is queued without being waited for; once the
-        // window draws it, its arrival is the one that redraws the frame.
+    fn a_drawn_picture_does_not_wait_for_the_library_behind_it() {
+        // The thread may already be decoding the first key when the window
+        // asks for one, so what this pins is that the ask jumps the queue
+        // rather than sitting at its end: a few may land first, never dozens.
+        let keys: Vec<String> = (0..40).map(|shade| stored(shade * 5)).collect();
         let mut art = Art::default();
-        let key = "0000000000000000-0";
-        art.prefetch([key.to_string()]);
-        art.request(key);
+        art.prefetch(keys.clone());
+        let last = keys.last().expect("the list is not empty").clone();
+        art.request(&last);
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut repainted = false;
-        while Instant::now() < deadline && !repainted {
-            repainted = art.poll();
-            if art.pending() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+        while art.decoded(&last).is_none() && Instant::now() < deadline {
+            art.poll();
+            std::thread::sleep(Duration::from_millis(1));
         }
 
-        assert!(repainted, "the picture the window drew asked for a frame");
+        assert!(
+            art.decoded(&last).is_some(),
+            "the picture the window asked for arrived"
+        );
+        let place = art
+            .order
+            .iter()
+            .position(|key| *key == last)
+            .expect("the picture arrived");
+        assert!(
+            place < 5,
+            "the ask jumped the queue: it arrived at {place} of {}",
+            art.order.len()
+        );
     }
 
     #[test]
-    fn only_a_picture_the_window_drew_asks_for_a_repaint() {
+    fn a_key_drawn_after_it_was_prefetched_is_decoded_once() {
+        let key = stored(20);
         let mut art = Art::default();
-        art.prefetch(["0000000000000000-0".to_string()]);
-        art.request("0000000000000001-0");
+        art.prefetch([key.clone()]);
+        art.request(&key);
+        settle(&mut art, &key);
+        art.poll();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut repainted = false;
-        while Instant::now() < deadline && !repainted {
-            repainted = art.poll();
-            if art.pending() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        assert!(art.decoded(&key).is_some_and(|cover| cover.is_some()));
+        assert!(!art.pending(), "nothing is left waiting");
+    }
 
-        assert!(repainted, "the picture the window waited for asked for one");
+    #[test]
+    fn forgetting_the_missing_asks_for_those_keys_again() {
+        let art_key = stored(30);
+        let mut art = Art::default();
+        art.request("0000000000000000-0");
+        art.request(&art_key);
+        settle(&mut art, "0000000000000000-0");
+        settle(&mut art, &art_key);
+
+        art.forget_missing();
+
         assert!(
-            !art.poll(),
-            "the arrivals behind it were taken in without one"
+            art.decoded("0000000000000000-0").is_none(),
+            "a key with no picture is asked for again"
+        );
+        assert!(
+            art.decoded(&art_key).is_some_and(|cover| cover.is_some()),
+            "a decoded picture is kept"
         );
     }
 
     #[test]
     fn a_key_asked_for_twice_is_queued_once() {
+        let key = stored(40);
         let mut art = Art::default();
-        let key = "0000000000000000-0";
-        art.prefetch([key.to_string(), key.to_string()]);
-        art.request(key);
-        settle(&mut art, key);
+        art.prefetch([key.clone(), key.clone()]);
+        art.request(&key);
+        settle(&mut art, &key);
 
         assert!(!art.pending());
         assert_eq!(art.asked.len(), 1, "one key, one entry");

@@ -549,7 +549,7 @@ fn read_library_with(
         if seen % PROGRESS_EVERY == 0 {
             progress(seen);
         }
-        if let Some(track) = cached_track(&cache, entry.path()) {
+        if let Some(track) = cached_track(&cache, entry.path(), &mut covers) {
             tracks.push(track);
         } else if let Some(track) = read_track(entry.path(), root, &mut covers) {
             tracks.push(track);
@@ -559,8 +559,15 @@ fn read_library_with(
 
     let library = Library::from_tracks(tracks);
     // A failed write only costs the next start its speed, so it is reported
-    // and not treated as a failed scan.
-    if let Err(error) = crate::cache::save(&library, root) {
+    // and not treated as a failed scan. A write that failed while storing a
+    // picture is skipped for the same reason, and because the entry would
+    // record art that is not in the cache: the next start reads it again.
+    let written = if covers.failed {
+        Err("cannot store album art in the cache".to_string())
+    } else {
+        crate::cache::save(&library, root)
+    };
+    if let Err(error) = written {
         eprintln!("blue-dove: {error}");
     }
     Ok(library)
@@ -568,11 +575,20 @@ fn read_library_with(
 
 /// The track the cache holds for `path`, when it still fits the file.
 ///
-/// Returns `None` when there is no entry or the file changed, which leaves the
-/// caller to read the file instead.
-fn cached_track(cache: &Option<crate::cache::Cache>, path: &Path) -> Option<Track> {
+/// Returns `None` when there is no entry, the file changed, or the picture the
+/// entry names is gone from the cache, which leaves the caller to read the file
+/// instead and store the picture again. The picture is checked once per key,
+/// not once per track, so an album costs one look at the disk.
+fn cached_track(
+    cache: &Option<crate::cache::Cache>,
+    path: &Path,
+    covers: &mut Covers,
+) -> Option<Track> {
     let cached = cache.as_ref()?.track(path)?;
-    cached.is_fresh().then(|| cached.to_track())
+    if !cached.is_fresh() || !cached.cover().is_none_or(|key| covers.present(key)) {
+        return None;
+    }
+    Some(cached.to_track())
 }
 
 /// Rebuilds the library from the cache, without reading an audio file.
@@ -707,6 +723,10 @@ struct Covers {
     by_hash: HashMap<u64, Option<String>>,
     /// Directory images, by directory.
     by_directory: HashMap<PathBuf, Option<String>>,
+    /// Whether a key's bytes are still in the cache, so it is looked at once.
+    present: HashMap<String, bool>,
+    /// Whether storing a picture failed, which leaves its tracks without art.
+    failed: bool,
 }
 
 impl Covers {
@@ -719,8 +739,31 @@ impl Covers {
             return key.clone();
         }
         let key = crate::cache::store_cover(bytes);
+        // A cache directory that refuses the write leaves no key to decode, so
+        // the album shows no art until one is stored. That is worth reporting
+        // rather than caching away: the scan that saw it skips the cache write,
+        // so the next start reads the files again and tries once more.
+        if key.is_none() {
+            self.failed = true;
+        }
         self.by_hash.insert(hash, key.clone());
         key
+    }
+
+    /// Whether the bytes stored under `key` are still in the cache.
+    ///
+    /// A cache whose pictures were deleted, or pruned by another library,
+    /// leaves its entries naming art that is not there. Answering `None` for
+    /// such a track makes the scan read its file again and store the picture
+    /// again, which is what keeps a deleted cache from costing the art for
+    /// good. The answer is kept, so an album costs one look at the disk.
+    fn present(&mut self, key: &str) -> bool {
+        if let Some(present) = self.present.get(key) {
+            return *present;
+        }
+        let present = crate::cache::has_cover(key);
+        self.present.insert(key.to_string(), present);
+        present
     }
 
     /// The key of the cover belonging to `directory`, when there is one.
@@ -1310,6 +1353,44 @@ mod tests {
             key,
             crate::cache::cover_key(&picture),
             "the key names the bytes"
+        );
+    }
+
+    #[test]
+    fn a_cover_deleted_from_the_cache_is_stored_again() {
+        // Deleting the cache directory must not cost the art of the whole
+        // library: an entry naming a picture that is gone is read again.
+        let art = Art::new("gone-cover");
+        let album = art.0.join("Album");
+        std::fs::create_dir_all(&album).expect("the album directory is made");
+        art.image("Album", "cover.jpg");
+        let track = album.join("song.wav");
+        std::fs::File::create(&track)
+            .and_then(|mut file| file.write_all(&wav(1)))
+            .expect("the track is written");
+
+        let first = read_library(&art.0).expect("the directory scans");
+        let key = first
+            .tracks
+            .first()
+            .and_then(|track| track.cover.clone())
+            .expect("the scan found the art");
+        assert!(crate::cache::has_cover(&key));
+
+        assert!(
+            crate::cache::forget_cover(&key),
+            "the picture is removed from the cache"
+        );
+
+        let second = read_library(&art.0).expect("the directory scans again");
+        assert_eq!(
+            second.tracks.first().and_then(|track| track.cover.clone()),
+            Some(key),
+            "the picture the entry named is stored again"
+        );
+        assert!(
+            crate::cache::has_cover(&second.tracks[0].cover.clone().unwrap_or_default()),
+            "and its bytes are back in the cache"
         );
     }
 

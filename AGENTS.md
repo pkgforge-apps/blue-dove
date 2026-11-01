@@ -420,27 +420,41 @@ Platform notes:
   tracks), so no scan and no cache read decodes a picture: they only
   record the key of one. A scan of a large directory therefore takes
   well under a second. `src/art.rs` holds the thread that does decode,
-  an `Art` per window, with one queue: `adopt_library` hands over every
-  key `Library::covers()` lists, and the drawing pass asks for what it
-  shows as it scrolls, so a cover is ready whether or not its row is ever
-  on screen. Only a picture the frame asked for makes the window repaint,
-  so the work behind it costs no frames. At most `KEPT` decoded pictures
-  are held; the one decoded longest ago is dropped and may be decoded
-  again later. `decode_now` is the blocking path MPRIS art uses.
+  an `Art` per window, with two kinds of work: `request` names a picture
+  the window is about to draw and is decoded next, and `prefetch` hands
+  over the whole library at once, which is worked through behind the
+  frames. The thread looks for drawn work before it touches the bulk, so
+  the cover on screen never waits for the queue; a key it has decoded is
+  skipped if the bulk names it later. `adopt_library` prefetches
+  `Library::covers()`, and the drawing pass asks for what it scrolls to,
+  so a cover is ready whether or not its row is ever painted. Only a
+  picture the frame asked for makes the window repaint, and `pending` is
+  true only while such a picture is outstanding, so the work behind it
+  costs no frames. At most `KEPT` decoded pictures are held; the one
+  decoded longest ago is dropped and may be decoded again later.
+  `decode_now` is the blocking path MPRIS art uses. A library that lands
+  keeps the pictures and textures `Library::covers()` still names, which
+  a rescan over the same album usually does, and forgets the keys that
+  answered with no picture, so one stored since is asked for again.
   `covers/` and `art/` are shared by every music directory's cache, so
   `prune_covers` keeps a key any `library-<hash>.toml` in the directory
-  still names, not only the one being written. A cache is named after the
-  resolved path, so a symlinked music directory and its target keep one
-  entry, and `Cache::load_from` answers `None` when the directory is gone,
-  since an unmounted drive would otherwise open as a library. `read_cache`
-  takes the cache at its word rather than checking every file against the
-  disk, which would cost one `stat` per track; the scan behind the window
-  is what reads a changed file again and rewrites the cache. An entry is
-  used by a scan only while the file's size and modification time match,
-  so a retagged file is read again. Bump `cache::VERSION` when the stored
-  shape changes, or an older file will be misread. Under `cfg(test)` the
-  cache directory is a temporary one, so a test scan never writes beside
-  the real library.
+  still names at the current `cache::VERSION`, not only the one being
+  written. A cache is named after the resolved path, so a symlinked music
+  directory and its target keep one entry, and the entries are moved to
+  the spelling the current scan walks so the other name still finds them.
+  `Cache::load_from` answers `None` when the directory is gone, since an
+  unmounted drive would otherwise open as a library. `read_cache` takes
+  the cache at its word rather than checking every file against the disk,
+  which would cost one `stat` per track; the scan behind the window is
+  what reads a changed file again and rewrites the cache. An entry is
+  used by a scan while the file's size and modification time match and
+  the picture it names is still in `covers/`, which is checked once per
+  key rather than once per track: that is what makes deleting the cache
+  directory safe, since the scan then reads the files that named the
+  missing pictures and stores them again. Bump `cache::VERSION` when the
+  stored shape changes, or an older file will be misread. Under
+  `cfg(test)` the cache directory is `target/test-cache`, so a test scan
+  never writes beside the real library.
 - Settings live in `config.toml` under the user's config directory.
   Playlists are stored there by file path, not by library index, because
   the library is rescanned at every start. They are written as they

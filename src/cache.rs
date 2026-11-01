@@ -115,6 +115,18 @@ impl Cache {
         if cache.version != VERSION || cache.root != root {
             return None;
         }
+        let stored = cache.root.clone();
+        cache.root = root.clone();
+        for track in &mut cache.tracks {
+            // The entries were written under the spelling the last scan used;
+            // the paths are moved to the spelling this one walks, so a
+            // directory opened through its other name still finds them.
+            if let Ok(path) = track.path.strip_prefix(&stored)
+                && let Some(resolved) = resolve_under(&root, &root.join(path))
+            {
+                track.path = resolved;
+            }
+        }
         for (index, track) in cache.tracks.iter().enumerate() {
             cache.by_path.insert(track.path.clone(), index);
         }
@@ -122,8 +134,16 @@ impl Cache {
     }
 
     /// The entry for `path`, which the caller then checks for freshness.
+    ///
+    /// A music directory reached through a symlink is the same place as the
+    /// directory it points at, so a path that misses is looked for again with
+    /// its root resolved: the two spellings then find one set of entries.
     pub fn track(&self, path: &Path) -> Option<&CachedTrack> {
-        self.tracks.get(*self.by_path.get(path)?)
+        if let Some(entry) = self.by_path.get(path) {
+            return self.tracks.get(*entry);
+        }
+        let resolved = resolve_under(&self.root, path)?;
+        self.tracks.get(*self.by_path.get(&resolved)?)
     }
 
     /// Every entry, for turning a cache into a library without a scan.
@@ -133,6 +153,11 @@ impl Cache {
 }
 
 impl CachedTrack {
+    /// The key of the picture this entry names, when it names one.
+    pub fn cover(&self) -> Option<&str> {
+        self.cover.as_deref()
+    }
+
     /// Whether the file still looks the way it did when it was read.
     pub fn is_fresh(&self) -> bool {
         stamp(&self.path) == Some((self.size, self.modified))
@@ -158,6 +183,19 @@ impl CachedTrack {
             tagged_album: self.tagged_album,
         }
     }
+}
+
+/// `path` written the way `root` is written, when it sits under it.
+///
+/// A scan that reached its files through a symlink names them with the link,
+/// and one that reached them directly names them with the target. Either name
+/// is the same file, so a path that missed is looked for again with the other.
+/// Answers `None` when the path is not under `root` at all.
+fn resolve_under(root: &Path, path: &Path) -> Option<PathBuf> {
+    let resolved_root = root.canonicalize().ok()?;
+    let resolved = path.canonicalize().ok()?;
+    let rest = resolved.strip_prefix(&resolved_root).ok()?;
+    Some(root.join(rest))
 }
 
 /// The path a music directory's cache is named after.
@@ -186,8 +224,14 @@ fn cache_dir() -> Option<PathBuf> {
     {
         // A test must not read or write the cache of the person running it:
         // a scan writes there, and a scan of a temporary directory would put
-        // an entry, and its pictures, beside the real library.
-        Some(std::env::temp_dir().join(format!("blue-dove-cache-{}", std::process::id())))
+        // an entry, and its pictures, beside the real library. The test
+        // directory sits in `target/`, so it goes with `cargo clean` rather
+        // than piling up in the system temporary directory.
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-cache"),
+        )
     }
     #[cfg(not(test))]
     {
@@ -246,7 +290,7 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
     }
     write_atomically(&path, text).at(&path)?;
 
-    prune_covers(dir, &cache.tracks);
+    prune_covers(dir);
     Ok(())
 }
 
@@ -258,12 +302,11 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
 ///
 /// The keys come from every library cache in `dir`, not just the one being
 /// written: the two directories are shared by all of them, so pruning against
-/// one root's tracks would delete the art of a second music directory.
-fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
-    let mut keep: HashSet<String> = tracks
-        .iter()
-        .filter_map(|track| track.cover.clone())
-        .collect();
+/// one root's tracks would delete the art of a second music directory. A file
+/// from another layout is skipped, since its keys name pictures of a shape
+/// this build does not read and would otherwise be kept for good.
+fn prune_covers(dir: &Path) {
+    let mut keep: HashSet<String> = HashSet::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -279,6 +322,9 @@ fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
         let Ok(cache) = toml::from_str::<Cache>(&text) else {
             continue;
         };
+        if cache.version != VERSION {
+            continue;
+        }
         keep.extend(cache.tracks.into_iter().filter_map(|track| track.cover));
     }
     for name in ["covers", "art"] {
@@ -437,6 +483,21 @@ fn prune_waveforms(dir: &Path) {
     for (_, path) in files.into_iter().take(excess) {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Removes the bytes stored under `key`, and says whether there were some.
+///
+/// Only tests use this, to stand in for a cache directory the user deleted.
+#[cfg(test)]
+pub fn forget_cover(key: &str) -> bool {
+    cache_dir()
+        .map(|dir| dir.join("covers").join(key))
+        .is_some_and(|path| std::fs::remove_file(path).is_ok())
+}
+
+/// Whether the bytes stored under `key` are still in the cache.
+pub fn has_cover(key: &str) -> bool {
+    cache_dir().is_some_and(|dir| dir.join("covers").join(key).is_file())
 }
 
 /// Reads back the encoded bytes stored under `key`.
@@ -866,6 +927,35 @@ mod tests {
         assert!(
             Cache::load_from(&scratch.0, &link).is_some(),
             "and the link finds it too"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_library_stored_under_one_spelling_is_found_under_the_other() {
+        // The cache is named after the resolved path, so opening the other
+        // spelling finds the file; its entries have to be found there too, or
+        // every track is read again.
+        let scratch = Scratch::new("symlink-entry");
+        let target = scratch.0.join("music");
+        std::fs::create_dir_all(&target).expect("the directory is made");
+        let file = target.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("the link is made");
+
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &target).expect("the cache is written");
+
+        let cache = Cache::load_from(&scratch.0, &link).expect("the cache is found");
+        let through_the_link = link.join("song.flac");
+        assert!(
+            cache.track(&through_the_link).is_some(),
+            "the entry is found through the link"
+        );
+        assert!(
+            cache.track(&file).is_some(),
+            "and through the target it was written from"
         );
     }
 
