@@ -29,7 +29,7 @@ use crate::library::{Library, Track};
 
 /// Version of the cache layout, so an older file is ignored rather than
 /// misread after a change to what is stored.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// Magic at the head of a stored waveform.
 const WAVEFORM_MAGIC: &[u8; 4] = b"BDWV";
@@ -65,7 +65,12 @@ pub struct Cache {
 /// One file's tags, as a scan read them.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CachedTrack {
-    /// Where the file lives.
+    /// Where the file lives, relative to the music directory.
+    ///
+    /// Storing it relative is what lets the cache survive the directory being
+    /// named another way: a symlink and its target, or `/tmp` and
+    /// `/private/tmp` on macOS, are one place under two names, and an absolute
+    /// path written under one would never match a scan that walked the other.
     path: PathBuf,
     /// Size when it was read, in bytes.
     size: u64,
@@ -110,24 +115,15 @@ impl Cache {
         if !root.is_dir() {
             return None;
         }
-        let root = cache_root(root);
-        let text = std::fs::read_to_string(dir.join(file_name(&root))).ok()?;
+        let text = std::fs::read_to_string(dir.join(file_name(root))).ok()?;
         let mut cache: Self = toml::from_str(&text).ok()?;
-        if cache.version != VERSION || cache.root != root {
+        if cache.version != VERSION || cache.root != cache_root(root) {
             return None;
         }
-        let stored = cache.root.clone();
-        cache.root = root.clone();
-        for track in &mut cache.tracks {
-            // The entries were written under the spelling the last scan used;
-            // the paths are moved to the spelling this one walks, so a
-            // directory opened through its other name still finds them.
-            if let Ok(path) = track.path.strip_prefix(&stored)
-                && let Some(resolved) = resolve_under(&root, &root.join(path))
-            {
-                track.path = resolved;
-            }
-        }
+        // The entries are relative, so the root is kept in the spelling this
+        // run names it by: a scan hands back the paths it walked, and those
+        // are written this way.
+        cache.root = root.to_path_buf();
         for (index, track) in cache.tracks.iter().enumerate() {
             cache.by_path.insert(track.path.clone(), index);
         }
@@ -136,20 +132,22 @@ impl Cache {
 
     /// The entry for `path`, which the caller then checks for freshness.
     ///
-    /// A music directory reached through a symlink is the same place as the
-    /// directory it points at, so a path that misses is looked for again with
-    /// its root resolved: the two spellings then find one set of entries.
+    /// The path is taken relative to the music directory, which is how entries
+    /// are stored: a directory reached through a link and the directory it
+    /// points at then find the same entries.
     pub fn track(&self, path: &Path) -> Option<&CachedTrack> {
-        if let Some(entry) = self.by_path.get(path) {
-            return self.tracks.get(*entry);
-        }
-        let resolved = resolve_under(&self.root, path)?;
-        self.tracks.get(*self.by_path.get(&resolved)?)
+        let relative = path.strip_prefix(&self.root).ok()?;
+        self.tracks.get(*self.by_path.get(relative)?)
     }
 
     /// Every entry, for turning a cache into a library without a scan.
     pub fn all(&self) -> &[CachedTrack] {
         &self.tracks
+    }
+
+    /// The music directory the entries were read from, as this run names it.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 }
 
@@ -159,18 +157,23 @@ impl CachedTrack {
         self.cover.as_deref()
     }
 
-    /// Whether the file still looks the way it did when it was read.
-    pub fn is_fresh(&self) -> bool {
-        stamp(&self.path) == Some((self.size, self.modified))
+    /// Where the file lives, under `root`.
+    pub fn path(&self, root: &Path) -> PathBuf {
+        root.join(&self.path)
     }
 
-    /// Rebuilds the track this entry describes.
+    /// Whether the file still looks the way it did when it was read.
+    pub fn is_fresh(&self, root: &Path) -> bool {
+        stamp(&self.path(root)) == Some((self.size, self.modified))
+    }
+
+    /// Rebuilds the track this entry describes, under `root`.
     ///
     /// The picture stays where it is: the entry carries its key, and
     /// `art.rs` decodes it off the drawing thread.
-    pub fn to_track(&self) -> Track {
+    pub fn to_track(&self, root: &Path) -> Track {
         Track {
-            path: self.path.clone(),
+            path: self.path(root),
             title: self.title.clone(),
             artist: self.artist.clone(),
             album: self.album.clone(),
@@ -184,19 +187,6 @@ impl CachedTrack {
             tagged_album: self.tagged_album,
         }
     }
-}
-
-/// `path` written the way `root` is written, when it sits under it.
-///
-/// A scan that reached its files through a symlink names them with the link,
-/// and one that reached them directly names them with the target. Either name
-/// is the same file, so a path that missed is looked for again with the other.
-/// Answers `None` when the path is not under `root` at all.
-fn resolve_under(root: &Path, path: &Path) -> Option<PathBuf> {
-    let resolved_root = root.canonicalize().ok()?;
-    let resolved = path.canonicalize().ok()?;
-    let rest = resolved.strip_prefix(&resolved_root).ok()?;
-    Some(root.join(rest))
 }
 
 /// The path a music directory's cache is named after.
@@ -276,12 +266,20 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
 fn write(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
     let path = dir.join(file_name(root));
     let mut tracks = Vec::with_capacity(library.tracks.len());
+    let base = cache_root(root);
     for track in &library.tracks {
         let Some((size, modified)) = stamp(&track.path) else {
             continue;
         };
+        let Ok(relative) = track
+            .path
+            .strip_prefix(root)
+            .or_else(|_| track.path.strip_prefix(&base))
+        else {
+            continue;
+        };
         tracks.push(CachedTrack {
-            path: track.path.clone(),
+            path: relative.to_path_buf(),
             size,
             modified,
             title: track.title.clone(),
@@ -672,7 +670,7 @@ mod tests {
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
         let key = cache
             .track(&file)
-            .and_then(|entry| entry.to_track().cover)
+            .and_then(|entry| entry.to_track(&scratch.0).cover)
             .expect("the cover was stored");
         let cover = cover();
         let art = art_file_in(&scratch.0.join("art"), &key, &cover).expect("the art is written");
@@ -719,15 +717,15 @@ mod tests {
 
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
         let entry = cache.track(&file).expect("the file has an entry");
-        assert!(entry.is_fresh(), "nothing touched the file");
+        assert!(entry.is_fresh(&scratch.0), "nothing touched the file");
 
-        let back = entry.to_track();
+        let back = entry.to_track(&scratch.0);
         assert_eq!(back.title, "Song");
         assert_eq!(back.duration, Duration::from_millis(123_456));
         assert_eq!((back.disc, back.number), (Some(1), Some(2)));
         assert_eq!(
             back.cover,
-            entry.to_track().cover,
+            entry.to_track(&scratch.0).cover,
             "the track names the picture the cache stored"
         );
     }
@@ -742,7 +740,12 @@ mod tests {
 
         std::fs::write(&file, b"a longer take").expect("the file changes");
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
-        assert!(!cache.track(&file).expect("the entry is there").is_fresh());
+        assert!(
+            !cache
+                .track(&file)
+                .expect("the entry is there")
+                .is_fresh(&scratch.0)
+        );
     }
 
     #[test]
@@ -982,9 +985,44 @@ mod tests {
             cache.track(&through_the_link).is_some(),
             "the entry is found through the link"
         );
+        assert_eq!(
+            cache
+                .track(&through_the_link)
+                .map(|entry| entry.path(&link)),
+            Some(through_the_link.clone()),
+            "and it names the file under the root it was looked up with"
+        );
+    }
+
+    #[test]
+    fn a_cache_holds_up_when_the_root_is_named_another_way() {
+        // macOS resolves `/tmp` to `/private/tmp`, and a scan may walk either
+        // spelling of the same directory. What it writes has to be found again
+        // by the other, or every start re-reads the whole library.
+        let scratch = Scratch::new("root-spelling");
+        let real = scratch.0.join("music");
+        std::fs::create_dir_all(&real).expect("the directory is made");
+        let file = real.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &real).expect("the cache is written");
+
+        // The other spelling: the same directory reached through a link.
+        let link = scratch.0.join("elsewhere");
+        std::os::unix::fs::symlink(&real, &link).expect("the link is made");
+
+        let cache = Cache::load_from(&scratch.0, &link).expect("the cache is found");
+        let entry = cache
+            .track(&link.join("song.flac"))
+            .expect("the entry is found under the other name");
         assert!(
-            cache.track(&file).is_some(),
-            "and through the target it was written from"
+            entry.is_fresh(&link),
+            "and the file it names is the one on disk"
+        );
+        assert_eq!(
+            entry.to_track(&link).path,
+            link.join("song.flac"),
+            "the track is named under the root this run walks"
         );
     }
 

@@ -584,11 +584,13 @@ fn cached_track(
     path: &Path,
     covers: &mut Covers,
 ) -> Option<Track> {
-    let cached = cache.as_ref()?.track(path)?;
-    if !cached.is_fresh() || !cached.cover().is_none_or(|key| covers.present(key)) {
+    let cache = cache.as_ref()?;
+    let cached = cache.track(path)?;
+    let root = cache.root();
+    if !cached.is_fresh(root) || !cached.cover().is_none_or(|key| covers.present(key)) {
         return None;
     }
-    Some(cached.to_track())
+    Some(cached.to_track(root))
 }
 
 /// Rebuilds the library from the cache, without reading an audio file.
@@ -603,7 +605,12 @@ fn cached_track(
 /// Answers `None` when there is no cache for the directory at all.
 pub fn read_cache(root: &Path) -> Option<Library> {
     let cache = crate::cache::Cache::load(root)?;
-    let tracks: Vec<Track> = cache.all().iter().map(|cached| cached.to_track()).collect();
+    let root = cache.root();
+    let tracks: Vec<Track> = cache
+        .all()
+        .iter()
+        .map(|cached| cached.to_track(root))
+        .collect();
     if tracks.is_empty() {
         return None;
     }

@@ -439,12 +439,16 @@ Platform notes:
   keeps the pictures and textures `Library::covers()` still names, which
   a rescan over the same album usually does, and forgets the keys that
   answered with no picture, so one stored since is asked for again.
+  Entries store a track's path relative to the music directory, so a
+  directory named another way still finds them: a symlink and its target,
+  or `/tmp` and `/private/tmp` on macOS, are one place under two names.
   `covers/` and `art/` are shared by every music directory's cache, so
   `prune_covers` keeps a key any `library-<hash>.toml` in the directory
   still names at the current `cache::VERSION`, not only the one being
   written. A cache is named after the resolved path, so a symlinked music
-  directory and its target keep one entry, and the entries are moved to
-  the spelling the current scan walks so the other name still finds them.
+  directory and its target keep one entry, and `Cache::load_from` keeps the
+  root in the spelling the current run uses so the tracks it builds are
+  named the way that run walks them.
   `Cache::load_from` answers `None` when the directory is gone, since an
   unmounted drive would otherwise open as a library. `read_cache` takes
   the cache at its word rather than checking every file against the disk,
