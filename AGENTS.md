@@ -463,8 +463,10 @@ Platform notes:
   `cfg(test)` the cache directory is `target/test-cache/<pid>`, so a test
   scan never writes beside the real library, and `save` there does not prune
   because the tests share that directory: a prune would delete pictures
-  another test stored. A temporary file is named with the thread and a
-  counter, so two writers of one file cannot lose each other's bytes.
+  another test stored. A temporary file is named with the process, the thread
+  and a counter, so two writers of one file lose each other's bytes only if
+  they share all three: `covers/` and `art/` are shared by every instance, and
+  two windows on one library write there at the same time.
 - Settings live in `config.toml` under the user's config directory.
   Playlists are stored there by file path, not by library index, because
   the library is rescanned at every start. They are written as they

@@ -79,8 +79,9 @@ impl Art {
     /// A key asked for this way is one the window is about to draw, so its
     /// arrival makes the window repaint, and it is decoded before anything
     /// `prefetch` queued. A key already handed over by `prefetch` is asked for
-    /// again rather than left behind the whole library: the thread skips a key
-    /// it has already decoded, so that costs nothing.
+    /// again rather than left behind the whole library, and one the thread has
+    /// decoded already is turned away on a hash lookup, so asking again on
+    /// every frame until the picture lands costs a message, not a decode.
     pub fn request(&mut self, key: &str) {
         if self.decoded.contains_key(key) {
             return;
@@ -238,6 +239,13 @@ fn handle(
 ) {
     match request {
         Request::Drawn(key) => {
+            // The window asks again on every frame until the picture arrives,
+            // so an answer already given is turned away before the backlog is
+            // walked: a pass over a whole library per frame is what scrolling
+            // during a prefetch would otherwise cost.
+            if done.contains(&key) {
+                return;
+            }
             // The bulk list may still hold it from a prefetch; a drawn key is
             // decoded now, so it is taken out rather than decoded twice.
             backlog.retain(|queued| *queued != key);
@@ -456,11 +464,19 @@ mod tests {
         let mut art = Art::default();
         art.prefetch(keys.clone());
         let deadline = Instant::now() + Duration::from_secs(10);
-        while art.decoded.len() < KEPT + 1 && Instant::now() < deadline {
+        let first = keys[0].clone();
+        // `make_room` caps `decoded` at `KEPT`, so waiting for a length past
+        // the cap would sleep out the whole deadline: what says the eviction
+        // happened is the cap being reached and the first key having gone.
+        while (art.order.len() < KEPT || art.decoded(&first).is_some()) && Instant::now() < deadline
+        {
             art.poll();
             std::thread::sleep(Duration::from_millis(2));
         }
-        let first = keys[0].clone();
+        assert!(
+            art.order.len() >= KEPT,
+            "the cap was reached before the deadline, so eviction happened"
+        );
         assert!(
             art.decoded(&first).is_none(),
             "the first picture was evicted for room"

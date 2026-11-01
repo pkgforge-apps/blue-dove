@@ -553,7 +553,15 @@ fn stamp(path: &Path) -> Option<(u64, u64)> {
 /// process would otherwise use the same temporary one and lose each other's
 /// bytes.
 fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let temporary = path.with_extension(format!("{}-{:?}.new", serial(), thread::current().id()));
+    // `covers/` and `art/` are shared by every instance, so two windows on one
+    // library write here at once: the name carries the process, the thread and
+    // a counter, which no two writers in either can repeat.
+    let temporary = path.with_extension(format!(
+        "{}.{:?}.{}.new",
+        std::process::id(),
+        thread::current().id(),
+        serial()
+    ));
     std::fs::write(&temporary, bytes)?;
     std::fs::rename(&temporary, path)
 }
