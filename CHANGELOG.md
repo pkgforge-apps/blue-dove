@@ -1,4 +1,10 @@
 
+## [0.1.12](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.11...v0.1.12) - 2026-11-01
+
+### Performance
+
+- Decode album art on demand instead of during the scan ([#42](https://github.com/pkgforge-apps/blue-dove/pull/42)) - ([cf9aecd](https://github.com/pkgforge-apps/blue-dove/commit/cf9aecd671bbb781ef6e67d070e6b1af04ba33d6))
+
 ## [0.1.11](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.10...v0.1.11) - 2026-10-31
 
 ### Bug Fixes
