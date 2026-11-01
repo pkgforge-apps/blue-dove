@@ -3,12 +3,13 @@
 //! Reading the tags of a large directory is quick, but decoding its album art is
 //! not: on a library of seven thousand tracks the pictures take most of the
 //! six seconds a scan needs. This keeps what a scan found - the tags and the
-//! already decoded covers - in the user's cache directory, so a start reads
-//! it back in a fraction of that.
+//! encoded cover files - in the user's cache directory, so a start reads it
+//! back in a fraction of that, and no scan or cache read decodes a picture.
 //!
 //! An entry is only good while its file is unchanged, which the stamp of the
 //! file's size and modification time decides. A file that was retagged is
-//! read again, and a directory that gained or lost files is scanned as usual.
+//! read again by the scan that runs behind the window, and a directory that
+//! gained or lost files is scanned as usual.
 //!
 //! The peak envelope the waveform seek bar draws is kept here too, one small
 //! file per track. Working it out means decoding the whole track, which is
@@ -17,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -28,10 +29,7 @@ use crate::library::{Library, Track};
 
 /// Version of the cache layout, so an older file is ignored rather than
 /// misread after a change to what is stored.
-const VERSION: u32 = 2;
-
-/// Magic at the head of a stored cover.
-const COVER_MAGIC: &[u8; 4] = b"BDCV";
+const VERSION: u32 = 4;
 
 /// Magic at the head of a stored waveform.
 const WAVEFORM_MAGIC: &[u8; 4] = b"BDWV";
@@ -67,7 +65,12 @@ pub struct Cache {
 /// One file's tags, as a scan read them.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CachedTrack {
-    /// Where the file lives.
+    /// Where the file lives, relative to the music directory.
+    ///
+    /// Storing it relative is what lets the cache survive the directory being
+    /// named another way: a symlink and its target, or `/tmp` and
+    /// `/private/tmp` on macOS, are one place under two names, and an absolute
+    /// path written under one would never match a scan that walked the other.
     path: PathBuf,
     /// Size when it was read, in bytes.
     size: u64,
@@ -89,7 +92,7 @@ pub struct CachedTrack {
     number: Option<u32>,
     /// Playing time in milliseconds.
     duration_ms: u64,
-    /// Key of the decoded cover, when the file or its directory had one.
+    /// Key of the stored picture, when the file or its directory had one.
     cover: Option<String>,
     /// Directory the file sits in, relative to the music directory.
     directory: PathBuf,
@@ -104,12 +107,23 @@ impl Cache {
     }
 
     /// Reads the cache in `dir` for `root`.
+    ///
+    /// Answers `None` when `root` is not a directory any more: an unmounted
+    /// drive or a removed folder would otherwise open as a library of tracks
+    /// that cannot be played.
     pub fn load_from(dir: &Path, root: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(dir.join(file_name(root))).ok()?;
-        let mut cache: Self = toml::from_str(&text).ok()?;
-        if cache.version != VERSION || cache.root != root {
+        if !root.is_dir() {
             return None;
         }
+        let text = std::fs::read_to_string(dir.join(file_name(root))).ok()?;
+        let mut cache: Self = toml::from_str(&text).ok()?;
+        if cache.version != VERSION || cache.root != cache_root(root) {
+            return None;
+        }
+        // The entries are relative, so the root is kept in the spelling this
+        // run names it by: a scan hands back the paths it walked, and those
+        // are written this way.
+        cache.root = root.to_path_buf();
         for (index, track) in cache.tracks.iter().enumerate() {
             cache.by_path.insert(track.path.clone(), index);
         }
@@ -117,31 +131,49 @@ impl Cache {
     }
 
     /// The entry for `path`, which the caller then checks for freshness.
+    ///
+    /// The path is taken relative to the music directory, which is how entries
+    /// are stored: a directory reached through a link and the directory it
+    /// points at then find the same entries.
     pub fn track(&self, path: &Path) -> Option<&CachedTrack> {
-        self.tracks.get(*self.by_path.get(path)?)
+        let relative = path.strip_prefix(&self.root).ok()?;
+        self.tracks.get(*self.by_path.get(relative)?)
     }
 
     /// Every entry, for turning a cache into a library without a scan.
     pub fn all(&self) -> &[CachedTrack] {
         &self.tracks
     }
+
+    /// The music directory the entries were read from, as this run names it.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 impl CachedTrack {
-    /// Whether the file still looks the way it did when it was read.
-    pub fn is_fresh(&self) -> bool {
-        stamp(&self.path) == Some((self.size, self.modified))
-    }
-
-    /// Key of the cover this entry uses, when it had one.
-    pub fn cover_key(&self) -> Option<&str> {
+    /// The key of the picture this entry names, when it names one.
+    pub fn cover(&self) -> Option<&str> {
         self.cover.as_deref()
     }
 
-    /// Rebuilds the track this entry describes, with the cover for it.
-    pub fn to_track(&self, cover: Option<Arc<Cover>>) -> Track {
+    /// Where the file lives, under `root`.
+    pub fn path(&self, root: &Path) -> PathBuf {
+        root.join(&self.path)
+    }
+
+    /// Whether the file still looks the way it did when it was read.
+    pub fn is_fresh(&self, root: &Path) -> bool {
+        stamp(&self.path(root)) == Some((self.size, self.modified))
+    }
+
+    /// Rebuilds the track this entry describes, under `root`.
+    ///
+    /// The picture stays where it is: the entry carries its key, and
+    /// `art.rs` decodes it off the drawing thread.
+    pub fn to_track(&self, root: &Path) -> Track {
         Track {
-            path: self.path.clone(),
+            path: self.path(root),
             title: self.title.clone(),
             artist: self.artist.clone(),
             album: self.album.clone(),
@@ -150,11 +182,20 @@ impl CachedTrack {
             disc: self.disc,
             number: self.number,
             duration: Duration::from_millis(self.duration_ms),
-            cover,
+            cover: self.cover.clone(),
             directory: self.directory.clone(),
             tagged_album: self.tagged_album,
         }
     }
+}
+
+/// The path a music directory's cache is named after.
+///
+/// A symlink and the directory it points at are one place, and one place keeps
+/// one cache: the path is resolved first, so either spelling of it finds the
+/// entry the other wrote. A path that cannot be resolved is used as it is.
+fn cache_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Name of the file the library for `root` is written to.
@@ -164,47 +205,81 @@ impl CachedTrack {
 /// away every time. The name is a hash of the path, so it is stable between
 /// runs without carrying a path into a file name.
 fn file_name(root: &Path) -> String {
-    let hash = digest(root.as_os_str().as_encoded_bytes());
+    let hash = digest(cache_root(root).as_os_str().as_encoded_bytes());
     format!("library-{hash:016x}.toml")
 }
 
 /// The directory the cache is kept in, when the platform has a cache directory.
 fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|dir| dir.join("blue-dove"))
+    #[cfg(test)]
+    {
+        // A test must not read or write the cache of the person running it:
+        // a scan writes there, and a scan of a temporary directory would put
+        // an entry, and its pictures, beside the real library.
+        //
+        // The directory sits in `target/`, so it goes with `cargo clean`
+        // rather than piling up in `/tmp`. The tests run in parallel and write
+        // to it, so `save` leaves pruning to `save_in`, which a test points at
+        // a directory of its own: a prune against the whole test cache would
+        // delete the pictures another test had just stored.
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-cache")
+                .join(std::process::id().to_string()),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        dirs::cache_dir().map(|dir| dir.join("blue-dove"))
+    }
 }
 
 /// Writes `library` as the cache for `root`.
 ///
-/// Covers already stored are left alone: an unchanged picture keeps its old
-/// file, so a rescan of a large directory writes a couple of megabytes of text
-/// and nothing else.
+/// The pictures are left where the scan stored them: an entry carries the
+/// key of its picture, so a rescan of a large directory writes a couple of
+/// megabytes of text and no image at all.
 pub fn save(library: &Library, root: &Path) -> Result<(), String> {
     let Some(dir) = cache_dir() else {
         return Err("no cache directory for this user".to_string());
     };
+    #[cfg(test)]
+    {
+        // A test's library and a test's pictures are stored in the same
+        // directory as every other test's; pruning there would delete art
+        // another test is about to read. `save_in` still prunes.
+        write(&dir, library, root)
+    }
+    #[cfg(not(test))]
     save_in(&dir, library, root)
 }
 
 /// Writes `library` as the cache kept in `dir`.
 pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
+    write(dir, library, root)?;
+    prune_covers(dir);
+    Ok(())
+}
+
+/// Writes `library` as the cache kept in `dir`, and prunes nothing.
+fn write(dir: &Path, library: &Library, root: &Path) -> Result<(), String> {
     let path = dir.join(file_name(root));
-    let mut digest_by_cover: HashMap<usize, String> = HashMap::new();
     let mut tracks = Vec::with_capacity(library.tracks.len());
+    let base = cache_root(root);
     for track in &library.tracks {
         let Some((size, modified)) = stamp(&track.path) else {
             continue;
         };
-        let cover = track.cover.as_ref().map(|cover| {
-            let pointer = Arc::as_ptr(cover) as usize;
-            if let Some(key) = digest_by_cover.get(&pointer) {
-                return key.clone();
-            }
-            let key = write_cover(dir, cover);
-            digest_by_cover.insert(pointer, key.clone());
-            key
-        });
+        let Ok(relative) = track
+            .path
+            .strip_prefix(root)
+            .or_else(|_| track.path.strip_prefix(&base))
+        else {
+            continue;
+        };
         tracks.push(CachedTrack {
-            path: track.path.clone(),
+            path: relative.to_path_buf(),
             size,
             modified,
             title: track.title.clone(),
@@ -215,7 +290,7 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
             disc: track.disc,
             number: track.number,
             duration_ms: track.duration.as_millis() as u64,
-            cover,
+            cover: track.cover.clone(),
             directory: track.directory.clone(),
             tagged_album: track.tagged_album,
         });
@@ -223,7 +298,7 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
 
     let cache = Cache {
         version: VERSION,
-        root: root.to_path_buf(),
+        root: cache_root(root),
         by_path: HashMap::new(),
         tracks,
     };
@@ -233,21 +308,42 @@ pub fn save_in(dir: &Path, library: &Library, root: &Path) -> Result<(), String>
         std::fs::create_dir_all(parent).at(parent)?;
     }
     write_atomically(&path, text).at(&path)?;
-
-    prune_covers(dir, &cache.tracks);
     Ok(())
 }
 
-/// Removes the stored covers no track refers to any more.
+/// Removes the stored covers no library refers to any more.
 ///
 /// The `art` directory holds the same covers as PNGs, for the media widget
 /// MPRIS names them to, so it is pruned by the same rule: a file named after
-/// a key the library still uses stays.
-fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
-    let keep: HashSet<&str> = tracks
-        .iter()
-        .filter_map(|track| track.cover.as_deref())
-        .collect();
+/// a key some library still uses stays.
+///
+/// The keys come from every library cache in `dir`, not just the one being
+/// written: the two directories are shared by all of them, so pruning against
+/// one root's tracks would delete the art of a second music directory. A file
+/// from another layout is skipped, since its keys name pictures of a shape
+/// this build does not read and would otherwise be kept for good.
+fn prune_covers(dir: &Path) {
+    let mut keep: HashSet<String> = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("library-") || !name.ends_with(".toml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(cache) = toml::from_str::<Cache>(&text) else {
+            continue;
+        };
+        if cache.version != VERSION {
+            continue;
+        }
+        keep.extend(cache.tracks.into_iter().filter_map(|track| track.cover));
+    }
     for name in ["covers", "art"] {
         let Ok(entries) = std::fs::read_dir(dir.join(name)) else {
             continue;
@@ -266,17 +362,17 @@ fn prune_covers(dir: &Path, tracks: &[CachedTrack]) {
 /// Writes `cover` as a PNG for the media widget that names the art by a file,
 /// and answers where it landed.
 ///
-/// The name is the hash of the pixels, so art that two tracks share is
-/// written once. Answers `None` when there is no cache directory, which
-/// leaves the metadata without art rather than failing.
-pub fn art_file(cover: &Cover) -> Option<PathBuf> {
-    art_file_in(&cache_dir()?.join("art"), cover)
+/// The file is named after `key`, the picture's place in `covers/`, so the two
+/// directories are pruned by one rule and art that two tracks share is
+/// written once. Answers `None` when there is no cache directory, which leaves
+/// the metadata without art rather than failing.
+pub fn art_file(key: &str, cover: &Cover) -> Option<PathBuf> {
+    art_file_in(&cache_dir()?.join("art"), key, cover)
 }
 
 /// Writes `cover` as a PNG in `dir`, and answers its path.
-fn art_file_in(dir: &Path, cover: &Cover) -> Option<PathBuf> {
-    let key = format!("{:016x}-{:x}.png", digest(&cover.rgba), cover.rgba.len());
-    let path = dir.join(key);
+fn art_file_in(dir: &Path, key: &str, cover: &Cover) -> Option<PathBuf> {
+    let path = dir.join(format!("{key}.png"));
     if path.is_file() {
         return Some(path);
     }
@@ -285,27 +381,33 @@ fn art_file_in(dir: &Path, cover: &Cover) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Stores `cover` and answers the key it is kept under.
+/// Stores the encoded bytes of a cover and answers the key it is kept under.
 ///
-/// The key is a hash of the pixels, so the same art in two albums is stored
-/// once and an unchanged cover is not written again.
-fn write_cover(dir: &Path, cover: &Cover) -> String {
-    let key = format!("{:016x}-{:x}", digest(&cover.rgba), cover.rgba.len());
+/// The key is a hash of those bytes, so the same art in two albums is stored
+/// once and an unchanged picture is not written again. The bytes are kept as
+/// they were found, not decoded: a start then reads a few hundred kilobytes
+/// of file names rather than a hundred decoded images. `art.rs` decodes one
+/// when the window draws it, or behind that work when it does not.
+pub fn store_cover(encoded: &[u8]) -> Option<String> {
+    store_cover_in(&cache_dir()?, encoded)
+}
+
+/// Stores the encoded bytes of a cover in the cache kept in `dir`.
+pub fn store_cover_in(dir: &Path, encoded: &[u8]) -> Option<String> {
+    let key = cover_key(encoded);
     let dir = dir.join("covers");
     let path = dir.join(&key);
     if path.is_file() {
-        return key;
+        return Some(key);
     }
-    if std::fs::create_dir_all(&dir).is_err() {
-        return key;
-    }
-    let mut bytes = Vec::with_capacity(12 + cover.rgba.len());
-    bytes.extend_from_slice(COVER_MAGIC);
-    bytes.extend_from_slice(&(cover.width as u32).to_le_bytes());
-    bytes.extend_from_slice(&(cover.height as u32).to_le_bytes());
-    bytes.extend_from_slice(&cover.rgba);
-    let _ = write_atomically(&path, bytes);
-    key
+    std::fs::create_dir_all(&dir).ok()?;
+    write_atomically(&path, encoded).ok()?;
+    Some(key)
+}
+
+/// The name a picture is stored under, which is a hash of its bytes.
+pub fn cover_key(encoded: &[u8]) -> String {
+    format!("{:016x}-{:x}", digest(encoded), encoded.len())
 }
 
 /// Reads the stored peak envelope for `path`, when one is there.
@@ -400,28 +502,32 @@ fn prune_waveforms(dir: &Path) {
     }
 }
 
-/// Reads back the cover stored under `key`.
-pub fn read_cover(key: &str) -> Option<Cover> {
+/// Removes the bytes stored under `key`, and says whether there were some.
+///
+/// Only tests use this, to stand in for a cache directory the user deleted.
+#[cfg(test)]
+pub fn forget_cover(key: &str) -> bool {
+    cache_dir()
+        .map(|dir| dir.join("covers").join(key))
+        .is_some_and(|path| std::fs::remove_file(path).is_ok())
+}
+
+/// Whether the bytes stored under `key` are still in the cache.
+pub fn has_cover(key: &str) -> bool {
+    cache_dir().is_some_and(|dir| dir.join("covers").join(key).is_file())
+}
+
+/// Reads back the encoded bytes stored under `key`.
+///
+/// Answers `None` when the picture has gone, which leaves the window drawing
+/// its placeholder rather than failing.
+pub fn read_cover(key: &str) -> Option<Vec<u8>> {
     read_cover_in(&cache_dir()?, key)
 }
 
-/// Reads back the cover stored under `key` in the cache kept in `dir`.
-pub fn read_cover_in(dir: &Path, key: &str) -> Option<Cover> {
-    let bytes = std::fs::read(dir.join("covers").join(key)).ok()?;
-    if bytes.get(..4)? != COVER_MAGIC {
-        return None;
-    }
-    let width = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
-    let height = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
-    let rgba = bytes.get(12..)?.to_vec();
-    if rgba.len() != width * height * 4 {
-        return None;
-    }
-    Some(Cover {
-        width,
-        height,
-        rgba,
-    })
+/// Reads back the encoded bytes stored under `key` in the cache kept in `dir`.
+pub fn read_cover_in(dir: &Path, key: &str) -> Option<Vec<u8>> {
+    std::fs::read(dir.join("covers").join(key)).ok()
 }
 
 /// A file's stamp: its size and the second its modification time falls in.
@@ -442,11 +548,29 @@ fn stamp(path: &Path) -> Option<(u64, u64)> {
 /// Writes `bytes` to `path`, through a temporary file beside it.
 ///
 /// A half-written file would be read back as a corrupt one, so the bytes land
-/// in a temporary name first and are moved into place in one step.
+/// in a temporary name first and are moved into place in one step. The name
+/// carries the thread and a counter, since two writers of the same file in one
+/// process would otherwise use the same temporary one and lose each other's
+/// bytes.
 fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let temporary = path.with_extension("new");
+    // `covers/` and `art/` are shared by every instance, so two windows on one
+    // library write here at once: the name carries the process, the thread and
+    // a counter, which no two writers in either can repeat.
+    let temporary = path.with_extension(format!(
+        "{}.{:?}.{}.new",
+        std::process::id(),
+        thread::current().id(),
+        serial()
+    ));
     std::fs::write(&temporary, bytes)?;
     std::fs::rename(&temporary, path)
+}
+
+/// A number no other call in the process gets, for naming a temporary file.
+fn serial() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// FNV-1a over `bytes`, used to name a cache file.
@@ -492,21 +616,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_cover_survives_being_stored() {
-        let scratch = Scratch::new("cover");
-        let key = write_cover(&scratch.0, &cover());
-        let back = read_cover_in(&scratch.0, &key).expect("the cover reads back");
-        assert_eq!((back.width, back.height), (2, 2));
-        assert_eq!(back.rgba, cover().rgba);
+    /// The bytes of a PNG holding [`cover`].
+    fn picture() -> Vec<u8> {
+        crate::cover::to_png(&cover()).expect("the picture encodes")
     }
 
     #[test]
-    fn the_same_pixels_are_stored_once() {
+    fn a_picture_survives_being_stored() {
+        let scratch = Scratch::new("cover");
+        let key = store_cover_in(&scratch.0, &picture()).expect("the picture is stored");
+        let back = read_cover_in(&scratch.0, &key).expect("the picture reads back");
+        assert_eq!(back, picture(), "the bytes come back as they went in");
+    }
+
+    #[test]
+    fn the_same_picture_is_stored_once() {
         let scratch = Scratch::new("once");
         assert_eq!(
-            write_cover(&scratch.0, &cover()),
-            write_cover(&scratch.0, &cover())
+            store_cover_in(&scratch.0, &picture()),
+            store_cover_in(&scratch.0, &picture())
         );
         let covers = std::fs::read_dir(scratch.0.join("covers"))
             .expect("the directory is there")
@@ -525,14 +653,15 @@ mod tests {
         // MPRIS names the art by a file, so the cover is written out as a PNG
         // the widget can open, and the same pixels reuse the file.
         let scratch = Scratch::new("art");
-        let path = art_file_in(&scratch.0.join("art"), &cover()).expect("the art is written");
+        let key = cover_key(&picture());
+        let path = art_file_in(&scratch.0.join("art"), &key, &cover()).expect("the art is written");
         assert!(path.is_file());
         assert_eq!(path.extension().and_then(|name| name.to_str()), Some("png"));
         let back = crate::cover::decode(&std::fs::read(&path).expect("the file reads"))
             .expect("the art decodes as an image");
         assert_eq!(back.rgba, cover().rgba);
         assert_eq!(
-            art_file_in(&scratch.0.join("art"), &cover()),
+            art_file_in(&scratch.0.join("art"), &key, &cover()),
             Some(path),
             "the same picture is written once"
         );
@@ -543,14 +672,16 @@ mod tests {
         let scratch = Scratch::new("prune-art");
         let file = scratch.0.join("song.flac");
         std::fs::write(&file, b"not really audio").expect("the file is written");
-        let library = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        let library =
+            Library::from_tracks(vec![track(&file, store_cover_in(&scratch.0, &picture()))]);
         save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
         let key = cache
             .track(&file)
-            .and_then(CachedTrack::cover_key)
+            .and_then(|entry| entry.to_track(&scratch.0).cover)
             .expect("the cover was stored");
-        let art = art_file_in(&scratch.0.join("art"), &cover()).expect("the art is written");
+        let cover = cover();
+        let art = art_file_in(&scratch.0.join("art"), &key, &cover).expect("the art is written");
 
         save_in(&scratch.0, &library, &scratch.0).expect("the cache is written again");
 
@@ -566,7 +697,7 @@ mod tests {
     }
 
     /// A track whose file is `path`.
-    fn track(path: &Path, cover: Option<Arc<Cover>>) -> Track {
+    fn track(path: &Path, cover: Option<String>) -> Track {
         Track {
             path: path.to_path_buf(),
             title: "Song".to_string(),
@@ -588,20 +719,23 @@ mod tests {
         let scratch = Scratch::new("round-trip");
         let file = scratch.0.join("song.flac");
         std::fs::write(&file, b"not really audio").expect("the file is written");
-        let library = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        let library =
+            Library::from_tracks(vec![track(&file, store_cover_in(&scratch.0, &picture()))]);
         save_in(&scratch.0, &library, &scratch.0).expect("the cache is written");
 
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
         let entry = cache.track(&file).expect("the file has an entry");
-        assert!(entry.is_fresh(), "nothing touched the file");
+        assert!(entry.is_fresh(&scratch.0), "nothing touched the file");
 
-        let key = entry.cover_key().expect("the cover was stored");
-        let cover = read_cover_in(&scratch.0, key).map(Arc::new);
-        let back = entry.to_track(cover);
+        let back = entry.to_track(&scratch.0);
         assert_eq!(back.title, "Song");
         assert_eq!(back.duration, Duration::from_millis(123_456));
         assert_eq!((back.disc, back.number), (Some(1), Some(2)));
-        assert!(back.cover.is_some(), "the art comes back with the track");
+        assert_eq!(
+            back.cover,
+            entry.to_track(&scratch.0).cover,
+            "the track names the picture the cache stored"
+        );
     }
 
     #[test]
@@ -614,7 +748,12 @@ mod tests {
 
         std::fs::write(&file, b"a longer take").expect("the file changes");
         let cache = Cache::load_from(&scratch.0, &scratch.0).expect("the cache reads back");
-        assert!(!cache.track(&file).expect("the entry is there").is_fresh());
+        assert!(
+            !cache
+                .track(&file)
+                .expect("the entry is there")
+                .is_fresh(&scratch.0)
+        );
     }
 
     #[test]
@@ -731,7 +870,8 @@ mod tests {
         let scratch = Scratch::new("prune");
         let file = scratch.0.join("song.flac");
         std::fs::write(&file, b"one").expect("the file is written");
-        let with_art = Library::from_tracks(vec![track(&file, Some(Arc::new(cover())))]);
+        let with_art =
+            Library::from_tracks(vec![track(&file, store_cover_in(&scratch.0, &picture()))]);
         save_in(&scratch.0, &with_art, &scratch.0).expect("the cache is written");
 
         let without = Library::from_tracks(vec![track(&file, None)]);
@@ -740,6 +880,127 @@ mod tests {
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(left, 0, "the art nobody refers to is gone");
+    }
+
+    /// A second picture, so two covers can be told apart.
+    fn other_picture() -> Vec<u8> {
+        crate::cover::to_png(&Cover {
+            width: 2,
+            height: 2,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
+        })
+        .expect("the picture encodes")
+    }
+
+    #[test]
+    fn pruning_keeps_the_covers_of_another_library() {
+        // `covers/` and `art/` are shared by every music directory's cache,
+        // so pruning against one library's tracks deleted the other's art.
+        let scratch = Scratch::new("shared-prune");
+        let mut keys = Vec::new();
+        for (name, picture) in [("first", picture()), ("second", other_picture())] {
+            let root = scratch.0.join(name);
+            std::fs::create_dir_all(&root).expect("the directory is made");
+            let file = root.join("song.flac");
+            std::fs::write(&file, b"one").expect("the file is written");
+            let key = store_cover_in(&scratch.0, &picture).expect("the picture is stored");
+            let library = Library::from_tracks(vec![track(&file, Some(key.clone()))]);
+            save_in(&scratch.0, &library, &root).expect("the cache is written");
+            keys.push(key);
+        }
+
+        let first = Library::from_tracks(vec![track(
+            &scratch.0.join("first").join("song.flac"),
+            Some(keys[0].clone()),
+        )]);
+        save_in(&scratch.0, &first, &scratch.0.join("first")).expect("the cache is written again");
+
+        for key in keys {
+            assert!(
+                scratch.0.join("covers").join(&key).is_file(),
+                "a cover another library uses stays"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_that_is_gone_is_no_library() {
+        // An unmounted drive leaves the cache behind; opening it would list
+        // tracks that cannot be played.
+        let scratch = Scratch::new("gone");
+        let root = scratch.0.join("music");
+        std::fs::create_dir_all(&root).expect("the directory is made");
+        let file = root.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &root).expect("the cache is written");
+        assert!(Cache::load_from(&scratch.0, &root).is_some());
+
+        std::fs::remove_dir_all(&root).expect("the directory goes");
+
+        assert!(
+            Cache::load_from(&scratch.0, &root).is_none(),
+            "the cache is not read for a directory that is gone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_its_target_keep_one_cache() {
+        // A music directory reached through a symlink and the directory it
+        // points at are one place, so naming it either way finds one cache.
+        let scratch = Scratch::new("symlink");
+        let target = scratch.0.join("music");
+        std::fs::create_dir_all(&target).expect("the directory is made");
+        let file = target.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("the link is made");
+
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &link).expect("the cache is written");
+
+        assert!(
+            Cache::load_from(&scratch.0, &target).is_some(),
+            "the target finds the cache the link wrote"
+        );
+        assert!(
+            Cache::load_from(&scratch.0, &link).is_some(),
+            "and the link finds it too"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_holds_up_when_the_root_is_named_another_way() {
+        // macOS resolves `/tmp` to `/private/tmp`, and a scan may walk either
+        // spelling of the same directory. What it writes has to be found again
+        // by the other, or every start re-reads the whole library.
+        let scratch = Scratch::new("root-spelling");
+        let real = scratch.0.join("music");
+        std::fs::create_dir_all(&real).expect("the directory is made");
+        let file = real.join("song.flac");
+        std::fs::write(&file, b"one").expect("the file is written");
+        let library = Library::from_tracks(vec![track(&file, None)]);
+        save_in(&scratch.0, &library, &real).expect("the cache is written");
+
+        // The other spelling: the same directory reached through a link.
+        let link = scratch.0.join("elsewhere");
+        std::os::unix::fs::symlink(&real, &link).expect("the link is made");
+
+        let cache = Cache::load_from(&scratch.0, &link).expect("the cache is found");
+        let entry = cache
+            .track(&link.join("song.flac"))
+            .expect("the entry is found under the other name");
+        assert!(
+            entry.is_fresh(&link),
+            "and the file it names is the one on disk"
+        );
+        assert_eq!(
+            entry.to_track(&link).path,
+            link.join("song.flac"),
+            "the track is named under the root this run walks"
+        );
     }
 
     #[test]
