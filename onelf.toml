@@ -27,9 +27,9 @@ dri = true
 no-gtk = true
 exclude = ["libdecor"]
 # winit and xkbcommon-dl load the X11 stack by name at runtime, so the
-# string scan cannot see it. libasound is what cpal links; the ALSA
-# plugins behind it load the audio servers, which are bundled here so the
-# app can play without a usable host audio stack of its own.
+# string scan cannot see it. The audio stack needs no entry: onelf
+# collects the ALSA plugins the build host installs for libasound, and
+# the sound server libraries they load, on its own.
 include = [
   "libX11.so.6",
   "libX11-xcb.so.1",
@@ -37,16 +37,4 @@ include = [
   "libXi.so.6",
   "libXrandr.so.2",
   "libxkbcommon-x11.so.0",
-  "libasound.so.2",
-  "libpulse.so.0",
-  "libpipewire-0.3.so.0",
-  "libasound_module_pcm_pulse.so",
-  "libasound_module_pcm_pipewire.so",
-  "libasound_module_pcm_upmix.so",
-  "libasound_module_pcm_vdownmix.so",
-  "libasound_module_rate_samplerate.so",
 ]
-# The ALSA plugins live outside the library directories ldconfig knows, so
-# they need a search path of their own to be found by name.
-search-paths = ["/usr/lib/alsa-lib"]
-
