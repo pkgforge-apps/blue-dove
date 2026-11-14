@@ -55,6 +55,9 @@ pub struct Config {
     /// Whether the album art is fitted into its square whole, rather than
     /// cropped to fill it.
     pub cover_fit: Option<bool>,
+    /// Whether the part of the waveform already played takes the accent
+    /// colour, rather than the part still to play.
+    pub waveform_accent_played: Option<bool>,
     /// Whether a launch naming one audio file opens the preview instead of
     /// the full window.
     pub preview: Option<bool>,
@@ -211,6 +214,7 @@ mod tests {
             ignore_hidden: Some(false),
             auto_scan: Some(false),
             cover_fit: Some(true),
+            waveform_accent_played: Some(true),
             preview: Some(false),
         };
 
@@ -247,6 +251,7 @@ mod tests {
         assert_eq!(loaded.background, Some(true));
         assert_eq!(loaded.ignore_hidden, Some(false));
         assert_eq!(loaded.cover_fit, Some(true));
+        assert_eq!(loaded.waveform_accent_played, Some(true));
         assert_eq!(loaded.preview, Some(false));
         assert_eq!(
             loaded.selected_track,

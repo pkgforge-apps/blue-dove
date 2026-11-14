@@ -1929,6 +1929,16 @@ impl App {
         }
     }
 
+    /// The colours of the waveform's two halves: the part played first, then
+    /// the part left, in the order `bar_mesh` takes them.
+    fn wave_colors(&self, accent: Color32, idle: Color32) -> (Color32, Color32) {
+        if self.waveform_accent_played {
+            (accent, idle)
+        } else {
+            (idle, accent)
+        }
+    }
+
     /// The waveform seek bar, drawn from the peaks of the playing track.
     pub(crate) fn waveform_bar(&mut self, ui: &mut egui::Ui) {
         let height = self.wave_height();
@@ -1969,19 +1979,22 @@ impl App {
         } else {
             let accent = self.accent();
             let idle = ui.visuals().widgets.inactive.bg_fill;
+            let (played_color, remaining_color) = self.wave_colors(accent, idle);
             let played_x = rect.left() + rect.width() * played;
             // The mesh is kept from frame to frame: a cursor that moves only
             // recolours the columns it crossed. One point a column is the
             // shape the GPU path had before it was cached; the software
             // renderer fills a rectangle a point, so it still takes two to
             // halve its fills.
-            let mesh = self.bar_mesh(rect, played_x, idle, accent);
+            let mesh = self.bar_mesh(rect, played_x, played_color, remaining_color);
             painter.add(egui::Shape::mesh(mesh));
             painter.line_segment(
                 [pos2(played_x, rect.top()), pos2(played_x, rect.bottom())],
                 Stroke::new(1.0, ui.visuals().text_color()),
             );
         }
+
+        response.context_menu(|ui| self.waveform_menu(ui));
 
         if response.dragged() {
             if let Some(pointer) = response.interact_pointer_pos() {
@@ -1998,6 +2011,20 @@ impl App {
             let fraction = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
             self.seek_to(fraction);
         }
+    }
+
+    /// What a right click on the waveform offers.
+    fn waveform_menu(&mut self, ui: &mut egui::Ui) {
+        self.setting_checkbox(
+            ui,
+            "Accent the part played",
+            self.waveform_accent_played,
+            Self::set_waveform_accent_played,
+        )
+        .on_hover_text(
+            "Paints the part already played in the accent and the part left in \
+             the dim colour, instead of the other way round",
+        );
     }
 
     /// The bars mesh for the waveform, reusing the last one.
@@ -3576,6 +3603,45 @@ mod layout_tests {
             mesh.vertices.len(),
             50 * 4,
             "the software path still takes two points a bar"
+        );
+    }
+
+    #[test]
+    fn flipping_the_waveform_colours_repaints_each_half() {
+        let mut app = crate::app::App::new(&egui::Context::default(), true, Vec::new());
+        app.peaks = vec![0.5; 4];
+        app.renderer = "gl";
+        let accent = app.accent();
+        let idle = Color32::GRAY;
+        assert_eq!(
+            app.wave_colors(accent, idle),
+            (idle, accent),
+            "the played part is dim and the part left takes the accent by default"
+        );
+
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(4.0, 40.0));
+        let played_x = rect.center().x;
+        let (played, remaining) = app.wave_colors(accent, idle);
+        let mesh = app.bar_mesh(rect, played_x, played, remaining);
+        assert_eq!(
+            mesh.vertices[0].color, idle,
+            "the part already played comes first"
+        );
+        assert_eq!(
+            mesh.vertices[12].color, accent,
+            "and the part still to play takes the accent"
+        );
+
+        app.waveform_accent_played = true;
+        let (played, remaining) = app.wave_colors(accent, idle);
+        let mesh = app.bar_mesh(rect, played_x, played, remaining);
+        assert_eq!(
+            mesh.vertices[0].color, accent,
+            "the toggle puts the accent on the part already played"
+        );
+        assert_eq!(
+            mesh.vertices[12].color, idle,
+            "and leaves the part still to play dim"
         );
     }
 
