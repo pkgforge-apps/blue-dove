@@ -4,9 +4,20 @@
 //! library. Several are open at once, shown as tabs, and each keeps its own
 //! position so switching tabs resumes where that playlist was left.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The last identity handed to a playlist.
+///
+/// A playlist keeps the identity it was made with, so the state a window
+/// keeps for one tab (how far the table is scrolled, which tab the player
+/// walks) is still that tab's after another is closed and the indices shift.
+static LAST_ID: AtomicU64 = AtomicU64::new(0);
+
 /// One playlist: a name and the tracks in it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Playlist {
+    /// Identity of this playlist, distinct from every other open this run.
+    pub id: u64,
     /// Name shown on the tab.
     pub name: String,
     /// Track indices into [`crate::library::Library::tracks`], in playing order.
@@ -19,8 +30,10 @@ impl Playlist {
     /// A playlist with a name and no tracks.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: LAST_ID.fetch_add(1, Ordering::Relaxed) + 1,
             name: name.into(),
-            ..Self::default()
+            tracks: Vec::new(),
+            cursor: None,
         }
     }
 
@@ -107,6 +120,11 @@ impl Playlists {
     pub fn current_mut(&mut self) -> &mut Playlist {
         let index = self.active.min(self.items.len() - 1);
         &mut self.items[index]
+    }
+
+    /// The playlist with identity `id`, while it is open.
+    pub fn get(&self, id: u64) -> Option<&Playlist> {
+        self.items.iter().find(|playlist| playlist.id == id)
     }
 
     /// Opens a new empty playlist and switches to it.
@@ -221,5 +239,21 @@ mod tests {
         assert_eq!(playlists.current().name, "Playlist 2");
         playlists.close(0);
         assert_eq!(playlists.current().name, "Playlist 2");
+    }
+
+    #[test]
+    fn a_tab_that_is_left_keeps_its_identity_when_another_closes() {
+        let mut playlists = Playlists::default();
+        playlists.add();
+        let (closed, kept) = (playlists.items[0].id, playlists.items[1].id);
+        assert_ne!(closed, kept, "two tabs are two playlists");
+
+        playlists.close(0);
+        assert!(playlists.get(closed).is_none(), "the closed tab is gone");
+        assert_eq!(
+            playlists.get(kept).map(|playlist| playlist.name.as_str()),
+            Some("Playlist 2"),
+            "what the window kept for that tab still names it"
+        );
     }
 }

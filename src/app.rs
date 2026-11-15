@@ -274,6 +274,14 @@ pub struct App {
     pub(crate) library: Library,
     /// The open playlists and which one is shown.
     pub(crate) playlists: Playlists,
+    /// Identity of the playlist playback walks, once a track was played by
+    /// hand.
+    ///
+    /// Next, Previous and Random follow the tab the music was started in
+    /// rather than the tab the window shows: looking at another playlist does
+    /// not take the player with it. `None` leaves the walk to the showing tab,
+    /// which is all there is before anything plays.
+    pub(crate) walking: Option<u64>,
     /// Scan in flight, with the number of files it has read so far.
     pub(crate) scan: Option<(Receiver<ScanMessage>, usize)>,
     /// Waveform of the playing track, until it arrives.
@@ -541,6 +549,7 @@ impl App {
             config,
             library: Library::default(),
             playlists: Playlists::default(),
+            walking: None,
             scan: None,
             waveform: None,
             peaks: Vec::new(),
@@ -933,6 +942,7 @@ impl App {
             return;
         };
         self.default_tab().set([index]);
+        self.walk_shown_tab();
         self.playing = Some(index);
         self.save_playlists();
     }
@@ -1316,11 +1326,35 @@ impl App {
         }
     }
 
+    /// Starts playing the track at `index`, in the playlist the window shows.
+    ///
+    /// Playing a row by hand also says where the player goes next: the tab it
+    /// was played from is the one Next, Previous and Random walk, even while
+    /// another tab is shown.
+    pub fn play(&mut self, index: usize) {
+        self.walk_shown_tab();
+        self.start(index);
+    }
+
+    /// Starts playing the track at `index`, leaving the walk where it is.
+    ///
+    /// Next, Previous, Random and a track that ran out all start a track in
+    /// the order that is already being walked, so none of them moves the walk
+    /// to another tab.
+    fn play_walked(&mut self, index: usize) {
+        self.start(index);
+    }
+
+    /// Points the walk at the playlist the window shows.
+    fn walk_shown_tab(&mut self) {
+        self.walking = Some(self.playlists.current().id);
+    }
+
     /// Starts playing the track at `index`.
     ///
     /// A track that cannot be opened, or an index the library does not hold,
     /// leaves the error in the status line and nothing playing.
-    pub fn play(&mut self, index: usize) {
+    fn start(&mut self, index: usize) {
         // Playing a row by hand ends a blind test: the two would fight over
         // the device, and the row would say which track X is.
         self.abx = None;
@@ -1350,9 +1384,17 @@ impl App {
                 self.seek = None;
                 // The table highlights the playing track, so the selection
                 // follows playback whether a click, Next, Repeat or Random
-                // started it.
-                self.select_only(index);
-                self.view.reveal = true;
+                // started it -- but only in the tab the music walks. A tab
+                // that is only being looked at keeps the row the user left
+                // there, so a step does not drag the table to a track that
+                // belongs to another playlist.
+                if self
+                    .walking
+                    .is_none_or(|id| self.playlists.current().id == id)
+                {
+                    self.select_only(index);
+                    self.view.reveal = true;
+                }
                 self.peaks.clear();
                 self.art = None;
                 self.waveform = Some(waveform::spawn(path));
@@ -1390,8 +1432,13 @@ impl App {
         if self.preview.is_some() {
             return;
         }
+        // With nothing playing there is no walk to carry on, so Next starts
+        // the tab that is showing, and goes on walking it.
+        if self.playing.is_none() {
+            self.walk_shown_tab();
+        }
         let Some(current) = self.playing.or(self.view.selected) else {
-            if let Some(&first) = self.playlists.current().tracks.first() {
+            if let Some(&first) = self.walked_tracks().first() {
                 self.play(first);
             }
             return;
@@ -1400,13 +1447,24 @@ impl App {
             self.seek_to(0.0);
             return;
         }
-        if self.random {
-            if let Some(index) = self.shuffled_neighbour(current, forward) {
-                self.play(index);
-            }
-            return;
+        if let Some(index) = self.next_track(current, forward) {
+            self.play_walked(index);
         }
-        self.step_linear(current, forward);
+    }
+
+    /// The track Next or Previous plays after `current`.
+    ///
+    /// Random draws the shuffled order of the tracks being walked; with it
+    /// off, the walk is straight along them. Either way the order is the one
+    /// playback is walking, not the one the window shows. A track that is not
+    /// in that order, such as one the playlist lost, starts it again rather
+    /// than stopping.
+    fn next_track(&mut self, current: usize, forward: bool) -> Option<usize> {
+        if self.random {
+            return self.shuffled_neighbour(current, forward);
+        }
+        let tracks = self.walked_tracks();
+        crate::playlist::neighbour(tracks, current, forward).or_else(|| tracks.first().copied())
     }
 
     /// The track after or before `current` in the shuffled order.
@@ -1418,24 +1476,26 @@ impl App {
         crate::playlist::neighbour(&order, current, forward).or_else(|| order.first().copied())
     }
 
-    /// Moves to the next or previous track in the order being walked.
-    fn step_linear(&mut self, current: usize, forward: bool) {
-        let tracks = self.walked_tracks();
-        // A track that was taken out of the playlist has no neighbour, so
-        // playback starts the list again rather than stopping.
-        let next = crate::playlist::neighbour(tracks, current, forward)
-            .or_else(|| tracks.first().copied());
-        if let Some(index) = next {
-            self.play(index);
-        }
+    /// Whether `id` names the playlist playback is walking.
+    ///
+    /// That is the tab the transport acts on, drawn with its name in the
+    /// accent colour, so the tab being read and the tab the music follows are
+    /// told apart. With nothing playing there is no walk to point at.
+    pub(crate) fn is_walking(&self, id: u64) -> bool {
+        self.playing.is_some() && self.walking == Some(id)
     }
 
     /// The tracks Next, Previous and Random walk through.
     ///
-    /// That is the queue a "play the selection" started, or the playlist.
+    /// That is the queue a "play the selection" started, or the playlist the
+    /// music was started from. Before anything has played, the showing tab is
+    /// all there is to walk.
     fn walked_tracks(&self) -> &[usize] {
-        match &self.queue {
-            Some(queue) => queue,
+        if let Some(queue) = &self.queue {
+            return queue;
+        }
+        match self.walking.and_then(|id| self.playlists.get(id)) {
+            Some(playlist) => &playlist.tracks,
             None => &self.playlists.current().tracks,
         }
     }
@@ -2560,6 +2620,9 @@ impl App {
             items: std::mem::take(&mut items),
             active,
         };
+        // The playlists are new, so the identity the walk was following named
+        // a tab that no longer exists.
+        self.walking = None;
         self.select_restored(selected);
     }
 
@@ -2752,7 +2815,7 @@ impl App {
             return;
         }
         if self.repeat {
-            self.play(index);
+            self.play_walked(index);
         } else {
             self.step(true);
         }
@@ -3058,6 +3121,11 @@ impl App {
         // hold the keyboard, so it is read before the focus check below.
         if self.view.searching && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.close_search();
+            // The whole playlist is back, and the row that was picked while
+            // the box was open can sit far from where the table was left: it
+            // is brought into view, so closing the search does not lose the
+            // track that was found.
+            self.view.reveal = self.view.selected.is_some();
         }
         // Down leaves the search box for the table, so the results it found
         // can be walked with the arrows. The text stays, and the box is one
@@ -3077,6 +3145,29 @@ impl App {
 
         if pressed(egui::Key::Space) {
             self.toggle();
+        }
+        // Shift and a letter work the transport and its modes as well, so
+        // playback does not have to reach for the arrows or the mouse: A and
+        // D step, S plays or pauses, Q stops, and R and E turn repeat and
+        // random on and off. A text box has the keyboard while it is open,
+        // so typing a capital letter never reaches these.
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::A) {
+            self.step(false);
+        }
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::D) {
+            self.step(true);
+        }
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::S) {
+            self.toggle();
+        }
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::Q) {
+            self.stop();
+        }
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::R) {
+            self.set_repeat(!self.repeat);
+        }
+        if chord(ctx, egui::Modifiers::SHIFT, egui::Key::E) {
+            self.set_random(!self.random);
         }
         if pressed(egui::Key::Delete) {
             self.remove_selected();
@@ -3662,6 +3753,104 @@ pub(crate) mod tests {
         assert_eq!(app.view.selected, Some(0));
         app.step_match(true);
         assert_eq!(app.view.selected, Some(0), "there is no match to step to");
+    }
+
+    #[test]
+    fn closing_the_search_brings_the_picked_row_back_into_view() {
+        let mut app = app_with(&[("One", &["Postlude", "Opening", "Finale"])]);
+        app.open_search();
+        app.view.filter = "open".to_string();
+        app.refilter();
+        assert_eq!(app.view.selected, Some(1), "the match is selected");
+        // The frame that drew the filtered table carried out the reveal.
+        app.view.reveal = false;
+        // The row was played from the search, so it is what plays now.
+        app.playing = Some(1);
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.handle_keys(ui.ctx()));
+        output.textures_delta.clear();
+
+        assert!(!app.view.searching, "Escape closes the search");
+        assert_eq!(
+            app.view.selected,
+            Some(1),
+            "the row that was picked is still the selection"
+        );
+        assert!(
+            app.view.reveal,
+            "and it is brought back into view when the whole playlist returns"
+        );
+    }
+
+    /// Runs the key handling for one frame with `key` pressed and Shift held.
+    fn press_shift(app: &mut App, key: egui::Key) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.handle_keys(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn shift_and_a_letter_work_the_transport() {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        let showing = app.playlists.current().id;
+        // A step with nothing playing starts the tab on screen, which is
+        // what pins the walk and tells the binding apart from none.
+        let unset = Some(u64::MAX);
+
+        app.walking = unset;
+        press_shift(&mut app, egui::Key::D);
+        assert_eq!(app.walking, Some(showing), "Shift+D is next");
+        app.walking = unset;
+        press_shift(&mut app, egui::Key::A);
+        assert_eq!(app.walking, Some(showing), "Shift+A is previous");
+        app.walking = unset;
+        press_shift(&mut app, egui::Key::S);
+        assert_eq!(app.walking, Some(showing), "Shift+S plays the tab");
+
+        app.playing = Some(0);
+        press_shift(&mut app, egui::Key::Q);
+        assert_eq!(app.playing, None, "Shift+Q stops");
+
+        assert!(!app.repeat);
+        press_shift(&mut app, egui::Key::R);
+        assert!(app.repeat, "Shift+R turns repeat on");
+        press_shift(&mut app, egui::Key::R);
+        assert!(!app.repeat, "and off again");
+
+        assert!(!app.random);
+        press_shift(&mut app, egui::Key::E);
+        assert!(app.random, "Shift+E turns random order on");
+        press_shift(&mut app, egui::Key::E);
+        assert!(!app.random, "and off again");
     }
 
     #[test]
@@ -4608,6 +4797,122 @@ pub(crate) mod tests {
             crate::playlist::neighbour(app.walked_tracks(), 3, true),
             Some(1)
         );
+    }
+
+    /// Two tabs holding some of the same tracks, the case where the playlist
+    /// a step walks is not something the tracks can say.
+    fn app_with_two_tabs() -> App {
+        let mut app = app_with(&[("One", &["A", "B", "C"])]);
+        // The second tab holds the first and last tracks of Default, so a
+        // step from the first track lands on a different track in each tab.
+        app.playlists.add();
+        app.playlists.current_mut().add([0, 2]);
+        app
+    }
+
+    #[test]
+    fn next_walks_the_playlist_the_music_was_started_in() {
+        let mut app = app_with_two_tabs();
+        // The Default tab is showing, and its first row is played by hand.
+        app.playlists.active = 0;
+        app.play(0);
+        // Then the other tab is opened to look at.
+        app.playlists.active = 1;
+        app.switch_playlist();
+
+        assert_eq!(
+            app.walked_tracks(),
+            [0, 1, 2],
+            "Next follows the tab the track was played from, not the one shown"
+        );
+        assert_eq!(
+            app.next_track(0, true),
+            Some(1),
+            "so it plays Default's next track, not the one the tab on screen has next"
+        );
+    }
+
+    #[test]
+    fn playing_a_row_in_the_shown_tab_takes_the_walk_there() {
+        let mut app = app_with_two_tabs();
+        app.play(0);
+        app.playlists.active = 0;
+        app.switch_playlist();
+        assert_eq!(app.walked_tracks(), [0, 2], "the walk is on the second tab");
+
+        app.play(1);
+        assert_eq!(
+            app.walked_tracks(),
+            [0, 1, 2],
+            "a row played by hand moves the walk to the tab it was played from"
+        );
+    }
+
+    #[test]
+    fn a_step_leaves_the_walk_on_the_playlist_that_plays() {
+        let mut app = app_with_two_tabs();
+        app.playlists.active = 0;
+        app.play(0);
+        let walking = app.playlists.current().id;
+        app.playlists.active = 1;
+        app.switch_playlist();
+        // A track is loaded, so Next has a walk to carry on.
+        app.playing = Some(0);
+
+        app.step(true);
+
+        assert_eq!(
+            app.walking,
+            Some(walking),
+            "Next does not take the player to the tab that is showing"
+        );
+    }
+
+    #[test]
+    fn a_step_with_nothing_playing_starts_the_tab_that_shows() {
+        let mut app = app_with_two_tabs();
+        app.playlists.active = 0;
+        app.play(0);
+        app.playlists.active = 1;
+        app.switch_playlist();
+        app.playing = None;
+        let showing = app.playlists.current().id;
+
+        app.step(true);
+
+        assert_eq!(
+            app.walking,
+            Some(showing),
+            "with nothing playing there is no walk to carry on, so Next starts the tab on screen"
+        );
+    }
+
+    #[test]
+    fn the_tab_that_plays_is_marked_until_it_stops() {
+        let mut app = app_with_two_tabs();
+        app.playlists.active = 0;
+        app.play(0);
+        // The tests have no audio, so the loaded track is set by hand.
+        app.playing = Some(0);
+        let playing = app.playlists.current().id;
+
+        assert!(
+            app.is_walking(playing),
+            "the tab the music was started in is marked"
+        );
+        app.playlists.active = 1;
+        app.switch_playlist();
+        assert!(
+            app.is_walking(playing),
+            "and stays marked while another tab is read"
+        );
+        assert!(
+            !app.is_walking(app.playlists.current().id),
+            "the tab being read is not the one marked"
+        );
+
+        app.stop();
+        assert!(!app.is_walking(playing), "a stop leaves no tab marked");
     }
 
     #[test]
@@ -5634,6 +5939,114 @@ pub(crate) mod tests {
             walk(&clipped.shape, &mut text);
         }
         text
+    }
+
+    /// Draws one frame of `app` on `ctx` with `events`, and answers the text
+    /// it painted.
+    ///
+    /// The context is the caller's, since what egui keeps between frames (the
+    /// scroll offset of a table) only lives as long as the context does.
+    fn frame_text(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> Vec<String> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        drawn_text(&output)
+    }
+
+    /// One notch of the wheel over the pointer, as the platform reports it.
+    ///
+    /// A scroll starts and moves: the start carries no distance, and the move
+    /// is what the frames after it apply.
+    fn wheel(notches: f32) -> [egui::Event; 2] {
+        [
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 0.0),
+                phase: egui::TouchPhase::Start,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -notches),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    }
+
+    /// The end of a scroll, which drops the distance a notch still had left.
+    fn wheel_end() -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 0.0),
+            phase: egui::TouchPhase::End,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn each_playlist_is_scrolled_where_it_was_left() {
+        // Long enough that the window shows a fraction of the rows.
+        let titles: Vec<String> = (0..60).map(|number| format!("Song {number:02}")).collect();
+        let names: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let mut app = app_with(&[("One", &names)]);
+        // A second tab holding every one of them, the case where a track sits
+        // at the same place in both tabs.
+        let tracks = app.playlists.current().tracks.clone();
+        app.playlists.add();
+        app.playlists.current_mut().add(tracks);
+        app.playlists.active = 0;
+
+        let ctx = egui::Context::default();
+        // The first frame lays the table out under the pointer.
+        frame_text(&ctx, &mut app, Vec::new());
+        let mut scrolling = vec![egui::Event::PointerMoved(egui::pos2(600.0, 500.0))];
+        scrolling.extend(wheel(4.0));
+        frame_text(&ctx, &mut app, scrolling);
+        // A notch is spent over the frames that follow it, the way a mouse's
+        // is smoothed out, so the table is given a handful of frames to move.
+        let mut scrolled = Vec::new();
+        for _ in 0..20 {
+            scrolled = frame_text(&ctx, &mut app, Vec::new());
+            if !scrolled.iter().any(|text| text == "Song 00") {
+                break;
+            }
+        }
+        assert!(
+            !scrolled.iter().any(|text| text == "Song 00"),
+            "the wheel scrolled the first row out of sight"
+        );
+        // The scroll is stopped, so what it still had left is not spent on
+        // the next frame or on the other tab.
+        frame_text(&ctx, &mut app, vec![wheel_end()]);
+        let stayed = frame_text(&ctx, &mut app, Vec::new());
+        assert!(
+            !stayed.iter().any(|text| text == "Song 00"),
+            "and the offset is kept for the next frame"
+        );
+
+        // The other tab opens where it was left: at its own top.
+        app.playlists.active = 1;
+        app.switch_playlist();
+        let other = frame_text(&ctx, &mut app, Vec::new());
+        assert!(
+            other.iter().any(|text| text == "Song 00"),
+            "a tab that was not scrolled still starts at its first row"
+        );
+        assert!(
+            !other.iter().any(|text| text == "Song 59"),
+            "and does not carry the other tab's offset"
+        );
     }
 
     #[test]
