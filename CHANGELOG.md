@@ -1,4 +1,10 @@
 
+## [0.1.22](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.21...v0.1.22) - 2026-11-15
+
+### Features
+
+- Playlist tab independence and transport keys ([#84](https://github.com/pkgforge-apps/blue-dove/pull/84)) - ([45218dd](https://github.com/pkgforge-apps/blue-dove/commit/45218ddbb7aba89e923be44e803789ecdac50102))
+
 ## [0.1.21](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.20...v0.1.21) - 2026-11-15
 
 ### Features
