@@ -433,6 +433,9 @@ pub struct App {
     /// Whether the album art is fitted whole into its square, rather than
     /// cropped to fill it.
     pub(crate) cover_fit: bool,
+    /// Whether the part of the waveform already played takes the accent
+    /// colour, rather than the part still to play.
+    pub(crate) waveform_accent_played: bool,
     /// Whether a launch naming one audio file opens the preview.
     pub(crate) preview_enabled: bool,
     /// The file the preview is showing, when it is.
@@ -514,6 +517,7 @@ impl App {
         let background = config.background.unwrap_or(false);
         let ignore_hidden = config.ignore_hidden.unwrap_or(true);
         let cover_fit = config.cover_fit.unwrap_or(false);
+        let waveform_accent_played = config.waveform_accent_played.unwrap_or(false);
         let auto_scan = config.auto_scan.unwrap_or(true);
         let preview_enabled = config.preview.unwrap_or(true);
         // The bus is reached on a thread of its own, so a host without one,
@@ -586,6 +590,7 @@ impl App {
             watch_failed: Vec::new(),
             scan_quiet: false,
             cover_fit,
+            waveform_accent_played,
             preview_enabled,
             preview: None,
             preview_art: false,
@@ -2279,6 +2284,14 @@ impl App {
     pub fn set_cover_fit(&mut self, cover_fit: bool) {
         self.cover_fit = cover_fit;
         self.config.cover_fit = Some(cover_fit);
+        self.save_settings();
+    }
+
+    /// Puts the accent on the part of the waveform already played, or back on
+    /// the part still to play.
+    pub fn set_waveform_accent_played(&mut self, accent_played: bool) {
+        self.waveform_accent_played = accent_played;
+        self.config.waveform_accent_played = Some(accent_played);
         self.save_settings();
     }
 

@@ -56,6 +56,7 @@ such as Clementine or Strawberry.
 
 - Draws the waveform of the playing track across the width of the window,
   and seeks anywhere in it by clicking or dragging, forwards or backwards.
+  A right click picks which half takes the accent colour.
 - Keeps several playlists open as tabs, each with its own name, and heads
   each album in a playlist with its cover and year.
 - Repeats the playing track, or shuffles the playlist and plays it in that

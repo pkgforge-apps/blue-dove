@@ -142,8 +142,11 @@ square, and **Fit the whole image** shows all of it, with the space it
 does not fill left as background. The choice is remembered.
 
 The bar at the bottom holds the waveform of the whole track, spanning
-the width of the window. The part already played is drawn in amber.
-Click anywhere in it to jump there, or drag along it to scrub.
+the width of the window. The part already played is drawn dim, and the
+part still to play takes the accent. A right click on the bar turns on
+**Accent the part played** to swap the two, and the choice is
+remembered. Click anywhere in it to jump there, or drag along it to
+scrub.
 
 The waveform is worked out once and kept in the cache directory, so a
 track played before draws its bar at once. The first time a track plays,
