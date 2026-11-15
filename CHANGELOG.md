@@ -1,4 +1,17 @@
 
+## [0.1.21](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.20...v0.1.21) - 2026-11-15
+
+### Features
+
+- Flip the waveform colours from a right click ([#81](https://github.com/pkgforge-apps/blue-dove/pull/81)) - ([6cacd80](https://github.com/pkgforge-apps/blue-dove/commit/6cacd80b49be6a3bd7b4c865bfd380918f42397a))
+
+### Miscellaneous Tasks
+
+- *(appimage)* Use the libsystemd stub - ([d81b6a6](https://github.com/pkgforge-apps/blue-dove/commit/d81b6a6372f24b359b74771f5eb1e236c9c99c35))
+- *(onelf)* Trim the recipe to what onelf 0.6.0 cannot find ([#58](https://github.com/pkgforge-apps/blue-dove/pull/58)) - ([957da9a](https://github.com/pkgforge-apps/blue-dove/commit/957da9a2d23015e72582fab52165d77d4b76390e))
+- State the no-Mesa choice in the app's own files ([#78](https://github.com/pkgforge-apps/blue-dove/pull/78)) - ([e9d86e0](https://github.com/pkgforge-apps/blue-dove/commit/e9d86e0bc353385a043eeca2d05894b826793f2f))
+- Sync shared guidelines ([#77](https://github.com/pkgforge-apps/blue-dove/pull/77)) - ([b9d0d77](https://github.com/pkgforge-apps/blue-dove/commit/b9d0d77496017d18f52875b544d1a4c332bfb263))
+
 ## [0.1.20](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.19...v0.1.20) - 2026-11-14
 
 ### Bug Fixes
