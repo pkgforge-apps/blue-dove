@@ -533,6 +533,25 @@ Platform notes:
   back, and Previous then Next plays the same track again. The order is
   drawn the first time it is needed and dropped by `forget_shuffle` when
   the playlist or queue changes, so it always fits what is being walked.
+- Next, Previous and Random walk the playlist the music was started in,
+  not the tab the window shows. `App::walking` holds that playlist's `id`:
+  `play` points it at the showing tab, since playing a row by hand says
+  where the player goes next, and `play_walked` leaves it alone, which is
+  what step, repeat and a track running out use. Showing another tab drops
+  the queue and the shuffle but not the walk, so browsing a second playlist
+  does not take the player with it; with nothing playing there is no walk to
+  continue, so `step` points it at the showing tab again. `start` moves the
+  table's selection and reveal only while the tab it walks is the one
+  showing, so a step never drags the table of a tab that is only being
+  browsed. A playlist's `id` also keys the track table's scroll area,
+  through `ScrollArea::id_salt(("track-table", id))`, so each tab keeps its
+  own offset and a closed tab does not pass its place to its neighbour.
+  The tab the walk is on draws its name in the accent colour, so the tab
+  being read and the tab the transport acts on are told apart; a stop
+  clears `playing`, which leaves no tab marked.
+- Closing the search puts the table on the row that was picked while it was
+  open: the filter hid most of the playlist, so the row can sit far from
+  where the table was left.
 - With "Keep Playing When Closed" on, closing the window hides it and the
   music plays on; the audio is on its own thread, so nothing stops. The
   rule lives in `keeps_playing_on_close`, which also says Quit and a
@@ -700,7 +719,11 @@ Platform notes:
   frame runs, and a quick press has released control by then, so a chord
   read from it arrives as a bare letter and is missed; the plain arrows
   never worked as volume keys for the same reason. The arrows walk the
-  table, `Shift` jumps to its ends and `Ctrl` changes the volume.
+  table, `Shift` jumps to its ends and `Ctrl` changes the volume. `Shift`
+  with a letter mirrors the transport and its modes: `A` and `D` step, `S`
+  plays or pauses, `Q` stops, and `R` and `E` turn repeat and random on and
+  off. They are read after the focus check, so a text box keeps them for
+  typing.
 - Double-clicking a directory appends what it holds to the playlist:
   `Directory::tracks_deep` walks it in the order the album list draws it,
   so each album's tracks in playing order, then the loose files beside
@@ -782,11 +805,15 @@ Platform notes:
   `table_rows` heads each run of an album's tracks with `TableRow::Album`,
   which draws the cover, the album name with its year, its artist and a
   rule to the right edge. A run that starts again after another album is
-  headed again, and a loose file heads nothing. The headings are taller
-  than the rows (`ALBUM_ROW_HEIGHT`), so `row_tops` gives each row its
-  place and the drawing and the reveal scroll both read from it rather
-  than multiplying a row index by one height. `Library::album_indices`
-  is what says which album a track belongs to, built once per frame.
+  headed again, and a loose file heads nothing. Where an album's run is
+  followed by loose files, `table_rows` puts a `TableRow::Rule` between
+  them, one point in the heading's colour, since no heading marks that end;
+  between two albums the heading is the separator and no rule is drawn. The
+  headings are taller than the rows (`ALBUM_ROW_HEIGHT`), so `row_tops`
+  gives each row its place and the drawing and the reveal scroll both read
+  from it rather than multiplying a row index by one height.
+  `Library::album_indices` is what says which album a track belongs to,
+  built once per frame.
 - The column titles sit in a strip above the scroll area rather than in
   it, so they stay in reach while a long playlist scrolls; the strip
   follows the rows sideways by the scroll offset. A right click on it

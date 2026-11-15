@@ -153,6 +153,13 @@ const ALBUM_ROW_HEIGHT: f32 = 50.0;
 /// album rather than as one more line of the list.
 const ALBUM_ROW_ART: f32 = 40.0;
 
+/// Height of the rule that closes an album's run where loose files follow,
+/// in points.
+///
+/// The line itself is one point; the rest is the room above and below it
+/// that keeps it from reading as the border of a row.
+const RULE_ROW_HEIGHT: f32 = 13.0;
+
 /// One line of the track table.
 ///
 /// A playlist is drawn as runs of albums: each run starts with a heading
@@ -162,6 +169,9 @@ const ALBUM_ROW_ART: f32 = 40.0;
 pub(crate) enum TableRow {
     /// The heading of the album at this library index.
     Album(usize),
+    /// A rule saying an album's run has ended, drawn where the loose files
+    /// that follow it start.
+    Rule,
     /// The track at this library index.
     Track(usize),
 }
@@ -171,6 +181,7 @@ impl TableRow {
     fn height(self) -> f32 {
         match self {
             Self::Album(_) => ALBUM_ROW_HEIGHT,
+            Self::Rule => RULE_ROW_HEIGHT,
             Self::Track(_) => ROW_HEIGHT,
         }
     }
@@ -187,6 +198,13 @@ fn table_rows(tracks: &[usize], albums: &[Option<usize>]) -> Vec<TableRow> {
     let mut previous = None;
     for &track in tracks {
         let album = albums.get(track).copied().flatten();
+        // A file with no album after one that had an album ends that album's
+        // run, and there is no heading to say so: a rule takes its place. A
+        // loose file before an album needs none, since the album's own
+        // heading follows, and two albums are told apart by theirs.
+        if previous.is_some() && album.is_none() {
+            rows.push(TableRow::Rule);
+        }
         if let Some(album) = album
             && previous != Some(album)
         {
@@ -1036,7 +1054,7 @@ impl App {
     fn controls(&mut self, ui: &mut egui::Ui, whole: bool) {
         // Tighter than the style's default, so the buttons and the slider
         // both fit the width the album art sets.
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = 5.0;
 
         let accent = self.accent();
         let repeat = toggle(ui, Icon::Repeat, self.repeat, accent);
@@ -1111,9 +1129,11 @@ impl App {
 
     /// Switches the table to another playlist.
     ///
-    /// What the old playlist left queued or shuffled no longer fits, and
-    /// the selection moves to the new playlist's first track.
-    fn switch_playlist(&mut self) {
+    /// What the old playlist left queued or shuffled no longer fits, and the
+    /// selection moves to the new playlist's first track. The player is not
+    /// moved: a track that is playing carries on, and Next still walks the
+    /// playlist it was started in.
+    pub(crate) fn switch_playlist(&mut self) {
         self.queue = None;
         self.forget_shuffle();
         // The tab that was showing had its own search; a new one starts whole.
@@ -1132,10 +1152,15 @@ impl App {
         let mut close = None;
         let mut rename = None;
         let mut add = false;
+        // The tab whose playlist playback is walking is named in the accent
+        // colour, the one the modes on the transport are drawn in, so the tab
+        // being looked at and the tab the music follows are told apart.
+        let accent = self.accent();
 
         ui.horizontal(|ui| {
             for (index, playlist) in self.playlists.items.iter().enumerate() {
                 let active = self.playlists.is_active(index);
+                let walking = self.is_walking(playlist.id);
                 let editing = self.view.renaming == Some(index);
 
                 if editing {
@@ -1161,7 +1186,11 @@ impl App {
                 }
 
                 let label = format!("{}  ({})", playlist.name, playlist.tracks.len());
-                let response = ui.selectable_label(active, label);
+                let mut text = egui::RichText::new(label);
+                if walking {
+                    text = text.color(accent);
+                }
+                let response = ui.selectable_label(active, text);
                 if response.clicked() {
                     show = Some(index);
                 }
@@ -1313,8 +1342,11 @@ impl App {
 
             // Both directions: the rows scroll up and down, and the table
             // scrolls sideways once the panel is narrower than the columns
-            // need.
+            // need. Each tab keeps its own offset, so switching tabs shows the
+            // rows that tab was left at rather than where the one before it
+            // had scrolled to.
             let output = egui::ScrollArea::both()
+                .id_salt(("track-table", self.playlists.current().id))
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
                     let tops = row_tops(&rows);
@@ -1333,6 +1365,24 @@ impl App {
                                 if let Some(entry) = self.library.albums.get(album) {
                                     album_heading(ui, rect, entry, texture.as_ref());
                                 }
+                                continue;
+                            }
+                            TableRow::Rule => {
+                                // The rule closing an album's run, drawn in
+                                // the colour of the rule in a heading. It
+                                // takes no row: a file with no album has no
+                                // heading of its own to start it.
+                                let y = rect.center().y;
+                                ui.painter().line_segment(
+                                    [
+                                        pos2(rect.left() + ROW_PADDING, y),
+                                        pos2(rect.right() - ROW_PADDING, y),
+                                    ],
+                                    Stroke::new(
+                                        1.0,
+                                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                                    ),
+                                );
                                 continue;
                             }
                             TableRow::Track(index) => index,
@@ -3221,9 +3271,10 @@ mod tests {
     }
 
     #[test]
-    fn a_loose_file_heads_nothing() {
+    fn a_loose_file_after_an_album_is_ruled_off() {
         // A file with no album tag belongs to no album, so there is no
-        // album to name above it.
+        // album to name above it. A rule says the album's run has ended, so
+        // the loose files are not read as part of it.
         let albums = [Some(0), None, None];
         let rows = table_rows(&[0, 1, 2], &albums);
         assert_eq!(
@@ -3231,8 +3282,28 @@ mod tests {
             [
                 TableRow::Album(0),
                 TableRow::Track(0),
+                TableRow::Rule,
                 TableRow::Track(1),
                 TableRow::Track(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn loose_files_before_an_album_need_no_rule() {
+        // The album's own heading says where its run starts, and two albums
+        // are told apart by theirs, so no rule is drawn between them.
+        let albums = [None, None, Some(0), Some(1)];
+        let rows = table_rows(&[0, 1, 2, 3], &albums);
+        assert_eq!(
+            rows,
+            [
+                TableRow::Track(0),
+                TableRow::Track(1),
+                TableRow::Album(0),
+                TableRow::Track(2),
+                TableRow::Album(1),
+                TableRow::Track(3),
             ]
         );
     }

@@ -101,12 +101,25 @@ file, so a playlist whose files moved comes back with the ones it can
 still find, and a directory that is not mounted leaves the saved tabs
 alone until it is back.
 
+The tabs are independent while you look at them. Each keeps the place it
+was scrolled to, so switching between two playlists that hold the same
+tracks does not take the table with it. The music also stays with the tab
+it was started in: next, previous, repeat and random carry on through
+that playlist even while another tab is showing, so browsing a second
+playlist does not change what plays next. Playing a row by hand is what
+moves the player to the tab that row is in. The name of the tab the music
+is following is drawn in amber, so the playlist the transport acts on is
+told apart from the one being read.
+
 A playlist that holds more than one album is drawn as a list of albums:
 wherever a run of an album's tracks starts, a heading names the album,
 with its cover, its artist and its year, and a rule running to the right
 edge. A playlist that goes back to an earlier album heads it again, so
 the heading always says which album the tracks under it belong to. Loose
-files belong to no album and get no heading.
+files belong to no album and get no heading. Where an album's tracks are
+followed by loose files, a plain rule closes the album, so the loose files
+are not read as part of it; two albums need no rule, since the heading of
+the second one already separates them.
 
 ## Play
 
@@ -335,9 +348,9 @@ plays both times. Changing the playlist, or a selection becoming the
 queue, draws a new shuffle. A track you start by hand carries on in the
 shuffle from where it sits in it.
 
-Selecting a track or pressing Next, Previous or Stop leaves the table
-showing the playing track, so the highlighted row is always what you
-hear.
+Selecting a track, or pressing Next, Previous or Stop while the tab it
+plays from is showing, leaves the table on the playing track, so the
+highlighted row is what you hear.
 
 ## Blind comparison
 
@@ -411,7 +424,8 @@ else.
 
 `Enter` wraps around, so it walks the matches rather than stopping at the
 last one. Once the box has given up the keyboard, the arrows walk the
-table as usual.
+table as usual. Closing the search brings the row that was picked back
+into view, so the cursor is not lost when the whole playlist returns.
 
 Opening an album, switching tabs or adding a directory closes the search,
 since what it found belonged to the playlist that was showing.
@@ -421,6 +435,11 @@ since what it found belonged to the playlist that was showing.
 | Key | Does |
 |-----|------|
 | `Space` | Play or pause |
+| `Shift+S` | Play or pause |
+| `Shift+A` / `Shift+D` | Previous or next track |
+| `Shift+Q` | Stop |
+| `Shift+R` | Repeat track on or off |
+| `Shift+E` | Random order on or off |
 | `Enter` | Play the selected row |
 | `Up` / `Down` | Select the row above or below |
 | `Shift+Up` / `Shift+Down` | Select the first or the last row |
