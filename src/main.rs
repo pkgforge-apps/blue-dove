@@ -60,13 +60,13 @@ fn window_viewport(
         .with_app_id(App::ID)
         .with_inner_size(start_size)
         .with_resizable(!preview)
-        // The full window's floor is the compact layout's minimum, so the
-        // window can be shrunk into the popup and on down to the size the
-        // popup itself allows.
+        // The full window's floor is narrow enough to be dragged into the
+        // popup and tall enough for the album art and its controls; once it
+        // is in the popup its floor becomes the size the popup picked.
         .with_min_inner_size(if preview {
             start_size
         } else {
-            app::COMPACT_MIN_SIZE
+            app::FULL_MIN_SIZE
         })
         // The window is drawn translucent so the desktop shows through it; a
         // compositor blends it, and without one it looks solid.

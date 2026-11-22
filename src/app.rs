@@ -116,11 +116,14 @@ pub const COMPACT_PLAYER_HEIGHT: f32 = 15.0;
 /// popup is made taller instead, since the art is the reason to use it.
 pub const COMPACT_SIZE: [f32; 2] = [310.0, 399.0];
 
-/// The size below which the window drops the album list and the playlist.
+/// The width below which the window drops the album list and the playlist.
 ///
-/// A window this small cannot show the columns and the art at once, so it
-/// becomes the popup: the menu bar, the art, the controls and the waveform.
-pub const COMPACT_BREAK: [f32; 2] = [560.0, 430.0];
+/// A window narrower than this cannot show the columns and the art at once,
+/// so it becomes the popup: the menu bar, the art, the controls and the
+/// waveform. The height takes no part: a window that is only short keeps the
+/// full layout, and [`FULL_MIN_SIZE`] stops it where the art and the controls
+/// still fit.
+pub const COMPACT_BREAK: f32 = 560.0;
 
 /// The size a preview opens at when its file carries no art, in points.
 ///
@@ -153,18 +156,26 @@ pub const COMPACT_NO_ART_SIZE: [f32; 2] = [310.0, 95.0];
 
 /// The smallest the window may be made in the full layout, in points.
 ///
-/// It is below [`COMPACT_BREAK`], so the window can be dragged down out of the
-/// full layout and into the popup at all. Once it is in the popup its floor
-/// becomes the size the popup picked for itself, so this is not the popup's
-/// floor.
-pub const COMPACT_MIN_SIZE: [f32; 2] = [240.0, 84.0];
+/// The width is below [`COMPACT_BREAK`], which is what lets the window be
+/// narrowed into the popup at all. The height is what the full layout needs
+/// for the menu bar, the album art at the width of the album column, the
+/// control strip below it and the player bar. The album list under the
+/// controls is what gives way: at the floor the controls are the last thing
+/// in the column, and the playlist still has the room beside it for the
+/// table. Once the window is in the popup its floor becomes the size the popup
+/// picked for itself, so this is not the popup's floor.
+pub const FULL_MIN_SIZE: [f32; 2] = [240.0, 405.0];
 
 /// The size the full window opens at, in points.
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1180.0, 760.0];
 
 /// Whether a window of `size` shows the compact layout.
+///
+/// Only the width decides: a window that is merely short keeps the album list
+/// and the playlist, and its floor stops it before the art and the controls
+/// run out of room.
 pub fn compact_for(size: egui::Vec2) -> bool {
-    size.x < COMPACT_BREAK[0] || size.y < COMPACT_BREAK[1]
+    size.x < COMPACT_BREAK
 }
 
 /// Height of the waveform, in points.
@@ -912,8 +923,8 @@ impl App {
             f32::INFINITY,
         )));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-            COMPACT_MIN_SIZE[0],
-            COMPACT_MIN_SIZE[1],
+            FULL_MIN_SIZE[0],
+            FULL_MIN_SIZE[1],
         )));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
             DEFAULT_WINDOW_SIZE[0],
@@ -2627,12 +2638,12 @@ impl App {
     }
 
     /// Picks the layout for the window's size, and snaps a window that has
-    /// shrunk into the compact one to its fixed size.
+    /// been narrowed into the compact one to its fixed size.
     ///
     /// The snap happens once, when the window crosses into the compact
     /// layout, so the window manager is not fought while the user drags:
-    /// after that the window can be resized freely, and growing it past the
-    /// break brings the album list and the playlist back.
+    /// after that the window can be resized freely, and growing it wide
+    /// brings the album list and the playlist back.
     fn update_layout(&mut self, ctx: &egui::Context) {
         let compact = compact_for(ctx.viewport_rect().size());
         if compact == self.compact {
@@ -2668,12 +2679,12 @@ impl App {
                 size[0], size[1],
             )));
         } else {
-            // Back in the full layout, the floor drops to the smallest the
-            // window may be at all, which is what lets it be dragged down
-            // into the popup again.
+            // Back in the full layout, the floor returns to the smallest the
+            // window may be there: narrow enough to be dragged into the popup
+            // again, and tall enough for the art and the controls.
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-                COMPACT_MIN_SIZE[0],
-                COMPACT_MIN_SIZE[1],
+                FULL_MIN_SIZE[0],
+                FULL_MIN_SIZE[1],
             )));
         }
     }
@@ -5038,14 +5049,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_small_window_is_the_popup() {
+    fn a_narrow_window_is_the_popup() {
         assert!(compact_for(egui::vec2(320.0, 400.0)));
-        assert!(compact_for(egui::vec2(900.0, 420.0)), "too short");
         assert!(compact_for(egui::vec2(500.0, 800.0)), "too narrow");
         assert!(!compact_for(egui::vec2(1180.0, 760.0)));
         assert!(
-            !compact_for(egui::vec2(560.0, 430.0)),
+            !compact_for(egui::vec2(COMPACT_BREAK, 760.0)),
             "the break is exclusive"
+        );
+    }
+
+    #[test]
+    fn a_short_window_keeps_the_full_layout() {
+        // The height has no say in the layout: a window that is only short
+        // still has the room beside the album list for the table, and its
+        // floor stops it before the art and the controls run out of room.
+        assert!(
+            !compact_for(egui::vec2(900.0, 420.0)),
+            "a window shorter than the break stays full"
+        );
+        assert!(
+            !compact_for(egui::vec2(900.0, 200.0)),
+            "and so does one far below what it can be dragged to"
+        );
+        assert!(
+            !compact_for(egui::vec2(COMPACT_BREAK, FULL_MIN_SIZE[1])),
+            "the full layout at its own floor"
         );
     }
 
@@ -5066,10 +5095,11 @@ pub(crate) mod tests {
             COMPACT_NO_ART_SIZE[1]
         )));
         assert!(compact_for(egui::vec2(COMPACT_SIZE[0], COMPACT_SIZE[1])));
-        // The full layout's floor is below the break, which is what lets the
-        // window be dragged down into the popup at all.
-        const { assert!(COMPACT_MIN_SIZE[0] < COMPACT_BREAK[0]) };
-        const { assert!(COMPACT_MIN_SIZE[1] < COMPACT_BREAK[1]) };
+        // The full layout's floor is below the break in width, which is what
+        // lets the window be dragged into the popup at all, and tall enough
+        // for the one cover the popup also shows at its own snap size.
+        const { assert!(FULL_MIN_SIZE[0] < COMPACT_BREAK) };
+        const { assert!(FULL_MIN_SIZE[1] >= COMPACT_SIZE[1]) };
     }
 
     #[test]

@@ -275,16 +275,20 @@ leave the app taken.
 
 ## The compact window
 
-Shrink the window past a certain size, about 560 by 430 points, and it
-drops the album list and the playlist: what is left is the menu bar, the
-album art, the controls and a thin waveform. That is small enough to sit
-in a corner as a popup while you work. Growing it again brings the rest
-back.
+Narrow the window below about 560 points and it drops the album list and
+the playlist: what is left is the menu bar, the album art, the controls
+and a thin waveform. That is small enough to sit in a corner as a popup
+while you work. Growing it wider brings the rest back.
 
-The window snaps to its compact size the moment it crosses that line, so
+Only the width does it. Dragging the height down stops when the menu bar,
+the full-size album art and the controls have just enough room above the
+waveform, so a short window keeps the playlist. The album list below the
+controls is what gives way.
+
+The window snaps to its compact size the moment it crosses that width, so
 the popup always opens at a size that fits it, and it can be resized
 freely from there. The size it was before the snap is not restored, so
-drag the window larger to get the album list back.
+drag the window wider to get the album list back.
 
 ## Selecting tracks
 

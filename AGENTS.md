@@ -772,24 +772,30 @@ Platform notes:
   cursor moves smoothly; a short track moves it across the bar quickly,
   and a slower rate showed as jumps. The MPRIS position poll stays at
   250 ms, which is all a client reading the position needs.
-- Below `COMPACT_BREAK` the window drops the album list and the playlist
-  and shows only the menu bar, the art, the controls and a thin waveform.
-  It snaps once, when it crosses into that layout, so the window manager
-  is not fought while the user drags; growing it back past the break
-  restores the full layout. The snap is `COMPACT_SIZE` when the track has
-  art and the shorter `COMPACT_NO_ART_SIZE` when it does not, so a missing
-  square leaves no empty height behind. The popup stays resizable but the
-  size it picked is also its floor, so it can be made larger and not
-  smaller: below that the controls and the waveform are squeezed out of a
-  window with no room for them. The ceiling is lifted with it, so growing
-  back past the break still returns the full layout, and the floor drops to
-  `COMPACT_MIN_SIZE` again on the way out, which is what lets the window be
-  dragged back down into the popup. The art keeps
-  its full width in the popup, and
-  the window is made tall enough for the line naming the track
-  (`compact_name`: the name, or the file name, then its position, both in
-  the accent) between the art and the controls; shrinking the art to fit
-  the line would defeat the point of the popup.
+- A window narrower than `COMPACT_BREAK` drops the album list and the
+  playlist and shows only the menu bar, the art, the controls and a thin
+  waveform. Only the width decides: a window dragged shorter keeps the full
+  layout, and its floor, `FULL_MIN_SIZE`, stops it where the menu bar, the
+  album art at the album column's width, the control strip and the player bar
+  still fit; the album list under the controls is what gives way when the
+  window is shorter than that, which still leaves the playlist the room
+  beside it for the table. The cover never shrinks in the full layout
+  (`ui::art_side` only takes the height into account in the popup). The
+  popup snaps once, when the window crosses into it, so the window manager
+  is not fought while the user drags; growing it wider brings the full
+  layout back. The snap is `COMPACT_SIZE` when the track has art and the
+  shorter `COMPACT_NO_ART_SIZE` when it does not, so a missing square leaves
+  no empty height behind. The popup stays resizable but the size it picked
+  is also its floor, so it can be made larger and not smaller: below that
+  the controls and the waveform are squeezed out of a window with no room
+  for them. The ceiling is lifted with it, so growing back past the width
+  still returns the full layout, and the floor returns to `FULL_MIN_SIZE` on
+  the way out, which is what lets the window be narrowed back into the
+  popup. The art keeps its full width in the popup, and the window is made
+  tall enough for the line naming the track (`compact_name`: the name, or
+  the file name, then its position, both in the accent) between the art and
+  the controls; shrinking the art to fit the line would defeat the point of
+  the popup.
 - The track table's columns are `ui::Column`, in drawing order: number,
   title, file name, artist, album and length. `column_layout` in `ui.rs`
   takes the six stored widths and `App::columns_shown`, and scales the

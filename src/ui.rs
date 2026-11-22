@@ -131,6 +131,12 @@ const ART_MARGIN: f32 = 8.0;
 /// Height of the strip the controls sit in, below the art.
 const CONTROL_STRIP: f32 = 34.0;
 
+/// Gap between the cover and the controls in the full layout, in points.
+const ART_GAP: f32 = 6.0;
+
+/// Gap between the cover and the name line in the popup, in points.
+const COMPACT_ART_GAP: f32 = 2.0;
+
 /// How much one wheel notch over the volume slider changes the volume.
 const VOLUME_PER_NOTCH: f32 = 0.05;
 
@@ -504,6 +510,23 @@ fn library_rows_height(rows: &[LibraryRow]) -> f32 {
 /// of its strip.
 fn wave_gap(strip: f32, height: f32) -> f32 {
     ((strip - height) / 2.0).max(0.0)
+}
+
+/// The side of the cover square, in points, for the room the window leaves.
+///
+/// In the full layout the cover takes the album column's width: the layout's
+/// floor keeps enough height for it, and a short window gives up the album
+/// list below the controls rather than the size of the art. The popup can be
+/// short as well as narrow, so there the square takes whichever of the width
+/// and the height it hits first, with the controls and the name line below it
+/// off the room it may take.
+fn art_side(width: f32, height: f32, compact: bool) -> f32 {
+    let room = (width - 2.0 * ART_MARGIN).max(1.0);
+    if !compact {
+        return room;
+    }
+    let reserved = CONTROL_STRIP + COMPACT_NAME_HEIGHT + COMPACT_ART_GAP + ART_MARGIN;
+    room.min((height - reserved).max(1.0))
 }
 
 /// Where each column starts, in points from the row's left edge.
@@ -894,19 +917,7 @@ impl App {
 
         // The art leaves room for the margin around it and stops short of
         // the controls, which sit below rather than over the cover.
-        let art_room = (ui.available_width() - 2.0 * ART_MARGIN).max(1.0);
-        // In the popup the window can be short as well as narrow, and the
-        // art is square: it takes whichever of the two limits it hits first.
-        // The name line and the controls sit below it, so their height comes
-        // off the room the art may take.
-        let side = if compact {
-            art_room.min(
-                (ui.available_height() - CONTROL_STRIP - COMPACT_NAME_HEIGHT - 2.0 * ART_MARGIN)
-                    .max(1.0),
-            )
-        } else {
-            art_room
-        };
+        let side = art_side(ui.available_width(), ui.available_height(), compact);
         // The cover is decoded at the size this square is drawn, so the size
         // has to be known before the texture is asked for: a thumbnail
         // stretched over a square this wide reads blurry.
@@ -941,7 +952,7 @@ impl App {
 
         // The popup keeps the name line close to the art and the controls:
         // the gaps around it are the only slack in a window this small.
-        ui.add_space(if compact { 2.0 } else { 6.0 });
+        ui.add_space(if compact { COMPACT_ART_GAP } else { ART_GAP });
 
         self.name_and_controls(ui, compact);
     }
@@ -3469,6 +3480,25 @@ mod layout_tests {
             None,
             "a row the table does not show cannot be scrolled to"
         );
+    }
+
+    #[test]
+    fn a_full_window_keeps_the_cover_at_its_width() {
+        // The cover is the album column's width in the full layout, whatever
+        // the height: a short window gives up the album list below the
+        // controls rather than shrinking the art.
+        let wide = art_side(290.0, 700.0, false);
+        assert_eq!(wide, 290.0 - 2.0 * ART_MARGIN);
+        assert_eq!(
+            art_side(290.0, 100.0, false),
+            wide,
+            "the height does not shrink the cover"
+        );
+        // The popup can be short as well as narrow, so it still shrinks the
+        // square, with the controls and the name line below it.
+        let popup = art_side(290.0, 100.0, true);
+        assert!(popup < wide);
+        assert!(popup + CONTROL_STRIP + COMPACT_NAME_HEIGHT + COMPACT_ART_GAP <= 100.0);
     }
 
     #[test]
