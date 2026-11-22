@@ -1,4 +1,10 @@
 
+## [0.1.23](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.22...v0.1.23) - 2026-11-22
+
+### Bug Fixes
+
+- *(ui)* Choose the compact popup by width alone - ([8eff989](https://github.com/pkgforge-apps/blue-dove/commit/8eff989c295073c2fc5fee27152bab6079833b32))
+
 ## [0.1.22](https://github.com/pkgforge-apps/blue-dove/compare/v0.1.21...v0.1.22) - 2026-11-15
 
 ### Features
