@@ -16,7 +16,7 @@ permissions: {}
 
 jobs:
   docs:
-    uses: pkgforge-apps/.github/.github/workflows/app-docs.yml@813c89d23f8b4fdd02d9238e5916fc0d43e7c046
+    uses: pkgforge-apps/.github/.github/workflows/app-docs.yml@a3e57eaaf22b1a2c0643363e7f75932750c80cf9
     permissions:
       contents: read
       pages: write
