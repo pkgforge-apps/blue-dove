@@ -29,7 +29,11 @@ reaches every app through its sync pull request; see the
    does nothing. Then `release-pr` opens or updates the release PR: the
    version bump in `Cargo.toml` and `Cargo.lock`, and the new
    `CHANGELOG.md` section, computed from conventional commits since the
-   last tag.
+   last tag. An app with a `PKGBUILD` in its root also gets a
+   `chore(release)` commit on the PR branch that sets `pkgver` to the new
+   version and `pkgrel` to 1; both must sit at the start of their line.
+   release-plz overwrites that commit, like any bot commit, each time it
+   refreshes the PR, and the step runs again.
 2. A PR pushed with `GITHUB_TOKEN` does not trigger `pull_request`
    workflows, so `release-pr` dispatches `ci.yml` on the PR branch
    itself. Its checks show on the PR as usual.
